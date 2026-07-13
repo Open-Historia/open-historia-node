@@ -1,0 +1,21 @@
+{
+  "name": "open-historia-node",
+  "version": "1.0.0",
+  "description": "A content node for the Open Historia network. Serves hash-verified map data so players load faster — never touches games, accounts, or API keys.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "open-historia-node": "node.js"
+  },
+  "scripts": {
+    "start": "node node.js",
+    "populate": "node scripts/populate.mjs",
+    "update": "node scripts/updater.mjs"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
