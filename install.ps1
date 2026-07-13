@@ -74,7 +74,8 @@ Write-Host "A Cloudflare Tunnel gives your node a public HTTPS address with no r
 Write-Host "setup and without exposing your home IP. It's free."
 $useTunnel = Read-Host "Set up a Cloudflare Tunnel now? [Y/n]"
 $publicUrl = ""
-$tunnelCmd = ""
+$tunnelMode = "none"
+$tunnelName = ""
 if ($useTunnel -notmatch "^[Nn]") {
   $cf = Join-Path $PSScriptRoot "cloudflared.exe"
   if (-not (Test-Path $cf)) {
@@ -96,11 +97,10 @@ if ($useTunnel -notmatch "^[Nn]") {
     $host1 = Read-Host "Hostname to use (a subdomain of your Cloudflare domain, e.g. node.example.com)"
     & $cf tunnel route dns $tname $host1
     $publicUrl = "https://$host1"
-    $tunnelCmd = "`"%~dp0cloudflared.exe`" tunnel run --url http://localhost:$port $tname"
+    $tunnelMode = "named"; $tunnelName = $tname
     Write-Host "Named tunnel ready at $publicUrl" -ForegroundColor Green
   } else {
-    # Quick tunnel: start.bat launches cloudflared, reads the printed URL, then starts the node.
-    $tunnelCmd = "QUICK"
+    $tunnelMode = "quick"
     Write-Host "Quick tunnel selected - your public URL is created each time you start." -ForegroundColor Green
   }
 }
@@ -110,48 +110,19 @@ Section "5/5  Downloading map content (~160 MB, one time)"
 npm run populate
 if ($LASTEXITCODE -ne 0) { Write-Host "Some content failed; re-run 'npm run populate' later." -ForegroundColor Yellow }
 
-# ---- Write start.bat ----
-if ($tunnelCmd -eq "QUICK") {
-  $startBat = @"
-@echo off
-cd /d "%~dp0"
-set OH_NODE_PORT=$port
-set OH_NODE_OPERATOR=$operator
-set OH_NODE_REGION=$region
-set OH_NODE_REGISTRY_URL=$registry
-set OH_NODE_DIRECTORY_URL=$directory
-echo Starting Cloudflare Tunnel...
-start "" /b cloudflared.exe tunnel --url http://localhost:$port > cloudflared.log 2>&1
-echo Waiting for the tunnel URL...
-set OH_NODE_PUBLIC_URL=
-for /l %%i in (1,1,30) do (
-  for /f "tokens=*" %%u in ('findstr /r /c:"https://[a-z0-9-]*\.trycloudflare\.com" cloudflared.log 2^>nul') do (
-    for /f "tokens=2 delims= " %%p in ("%%u") do if not defined OH_NODE_PUBLIC_URL set OH_NODE_PUBLIC_URL=%%p
-  )
-  if defined OH_NODE_PUBLIC_URL goto :ready
-  timeout /t 1 >nul
-)
-:ready
-echo Your node is reachable at %OH_NODE_PUBLIC_URL%
-node node.js
-pause
-"@
-} else {
-  $tunnelLine = if ($tunnelCmd) { "start `"`" /b $tunnelCmd" } else { "" }
-  $startBat = @"
-@echo off
-cd /d "%~dp0"
-set OH_NODE_PORT=$port
-set OH_NODE_OPERATOR=$operator
-set OH_NODE_REGION=$region
-set OH_NODE_REGISTRY_URL=$registry
-set OH_NODE_DIRECTORY_URL=$directory
-set OH_NODE_PUBLIC_URL=$publicUrl
-$tunnelLine
-node node.js
-pause
-"@
+# ---- Write config + start.bat (run.mjs starts the tunnel + node reliably) ----
+$config = [ordered]@{
+  port = [int]$port; operator = $operator; region = $region
+  registry = $registry; directory = $directory
+  tunnel = $tunnelMode; tunnelName = $tunnelName; publicUrl = $publicUrl
 }
+($config | ConvertTo-Json) | Set-Content -Path (Join-Path $PSScriptRoot "node.config.json") -Encoding UTF8
+$startBat = @"
+@echo off
+cd /d "%~dp0"
+node run.mjs
+pause
+"@
 Set-Content -Path (Join-Path $PSScriptRoot "start.bat") -Value $startBat -Encoding ASCII
 
 Write-Host ""

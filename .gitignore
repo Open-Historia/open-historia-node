@@ -8,6 +8,7 @@ data/
 start.bat
 start.sh
 start.command
+node.config.json
 # cloudflared binary + logs (downloaded by the installer)
 cloudflared
 cloudflared.exe

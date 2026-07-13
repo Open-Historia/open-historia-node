@@ -160,15 +160,16 @@ const register = async () => {
     hashes: listContentHashes().length,
     ts: new Date().toISOString(),
   };
-  const body = JSON.stringify(payload);
-  const signature = cryptoSign(null, Buffer.from(body), createPrivateKey(identity.privateKeyPem)).toString("base64");
   try {
+    const body = JSON.stringify(payload);
+    const signature = cryptoSign(null, Buffer.from(body), createPrivateKey(identity.privateKeyPem)).toString("base64");
     const res = await fetch(`${REGISTRY_URL.replace(/\/$/, "")}/register`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Node-Signature": signature },
       body,
     });
-    if (!res.ok) console.warn(`registry: HTTP ${res.status}`);
+    if (res.ok) console.log(`Registered with the registry as ${(await res.json().catch(() => ({}))).status || "pending"}.`);
+    else console.warn(`registry: HTTP ${res.status}`);
   } catch (error) {
     console.warn(`registry unreachable: ${error.message}`);
   }
@@ -207,16 +208,32 @@ const refreshControl = async () => {
 };
 
 const listenArgs = HOST ? [PORT, HOST] : [PORT];
-app.listen(...listenArgs, async () => {
+const server = app.listen(...listenArgs, async () => {
   console.log(`Open Historia content node "${identity.id}" on http://${HOST || "0.0.0.0"}:${PORT}`);
   console.log(`Serving ${listContentHashes().length} object(s) from ${CONTENT_DIR}`);
   if (PUBLIC_URL) console.log(`Public URL: ${PUBLIC_URL}`);
-  console.log(REGISTRY_URL ? `Registry: ${REGISTRY_URL} (registering as pending — an admin must accept this node)` : "No registry configured — this node will not receive player traffic until it is added to the signed directory.");
-
-  await refreshControl();
-  await register();
+  console.log(
+    REGISTRY_URL && PUBLIC_URL
+      ? `Registry: ${REGISTRY_URL} — registering as pending (an admin must accept this node).`
+      : "Not registering: OH_NODE_REGISTRY_URL and OH_NODE_PUBLIC_URL must both be set (the installer's Cloudflare Tunnel does this). No player traffic reaches an unregistered node.",
+  );
+  // Startup tasks must never crash the node (Node aborts on an unhandled rejection).
+  try {
+    await refreshControl();
+    await register();
+  } catch (error) {
+    console.warn(`startup tasks failed (will retry): ${error.message}`);
+  }
   const registerTimer = setInterval(register, 15 * 60 * 1000);
   const controlTimer = setInterval(refreshControl, 5 * 60 * 1000);
   if (typeof registerTimer.unref === "function") registerTimer.unref();
   if (typeof controlTimer.unref === "function") controlTimer.unref();
+});
+server.on("error", (error) => {
+  if (error.code === "EADDRINUSE") {
+    console.error(`Port ${PORT} is already in use. Close the other program using it, or set OH_NODE_PORT to a free port.`);
+  } else {
+    console.error(`Server error: ${error.message}`);
+  }
+  process.exit(1);
 });

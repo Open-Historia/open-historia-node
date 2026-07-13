@@ -94,27 +94,24 @@ fi
 section "5/5  Downloading map content (~160 MB, one time)"
 npm run populate || echo "Some content failed; re-run 'npm run populate' later."
 
-# ---- Write start.command (double-clickable) ----
+# ---- Write config + start.command (run.mjs starts the tunnel + node) ----
+cat > node.config.json <<EOF
 {
-  echo '#!/usr/bin/env bash'
-  echo 'cd "$(dirname "$0")"'
-  echo "export OH_NODE_PORT=\"$PORT\""
-  echo "export OH_NODE_OPERATOR=\"$OPERATOR\""
-  echo "export OH_NODE_REGION=\"$REGION\""
-  echo "export OH_NODE_REGISTRY_URL=\"$REGISTRY\""
-  echo "export OH_NODE_DIRECTORY_URL=\"$DIRECTORY\""
-  if [ "$TUNNEL_MODE" = "quick" ]; then
-    echo 'echo "Starting Cloudflare Tunnel..."'
-    echo "./cloudflared tunnel --url http://localhost:$PORT > cloudflared.log 2>&1 &"
-    echo 'for i in $(seq 1 30); do URL=$(grep -oE "https://[a-z0-9-]+\.trycloudflare\.com" cloudflared.log | head -1); [ -n "$URL" ] && break; sleep 1; done'
-    echo 'export OH_NODE_PUBLIC_URL="$URL"'
-    echo 'echo "Your node is reachable at $OH_NODE_PUBLIC_URL"'
-  elif [ "$TUNNEL_MODE" = "named" ]; then
-    echo "export OH_NODE_PUBLIC_URL=\"$PUBLIC_URL\""
-    echo "./cloudflared tunnel run --url http://localhost:$PORT \"$TUNNEL_NAME\" &"
-  fi
-  echo 'exec node node.js'
-} > start.command
+  "port": $PORT,
+  "operator": "$OPERATOR",
+  "region": "$REGION",
+  "registry": "$REGISTRY",
+  "directory": "$DIRECTORY",
+  "tunnel": "$TUNNEL_MODE",
+  "tunnelName": "$TUNNEL_NAME",
+  "publicUrl": "$PUBLIC_URL"
+}
+EOF
+cat > start.command <<'EOF'
+#!/usr/bin/env bash
+cd "$(dirname "$0")"
+exec node run.mjs
+EOF
 chmod +x start.command
 
 echo ""
