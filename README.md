@@ -34,34 +34,31 @@ players bad data — the worst it can do is get ignored.
 
 ## One-click install
 
+The installer does **everything** — dependencies, map content, a **Cloudflare Tunnel**
+so players can reach you, and a `start` script — and walks you through it.
+
 1. **[Download this repository as a ZIP](https://github.com/Open-Historia/open-historia-node/archive/refs/heads/main.zip)** and unzip it (or `git clone`).
 2. Run the installer:
    - **Windows:** double-click **`install.bat`**
-   - **macOS / Linux:** `chmod +x install.sh && ./install.sh`
-3. Answer the few prompts (your public URL, name, region). The installer downloads
-   and verifies the map content and writes a **`start.bat`** / **`start.sh`** you can
-   run any time.
+   - **macOS:** double-click **`install.command`** (if macOS blocks it, right-click → **Open** the first time). No Homebrew required.
+   - **Linux:** `chmod +x install.sh && ./install.sh`
+3. Answer the few prompts. When it offers the **Cloudflare Tunnel**, pick:
+   - **Quick** — instant, free, no account; a temporary `…trycloudflare.com` URL (fine to try it out; the URL changes if you restart).
+   - **Named** — a **permanent** URL; it logs you in and routes a subdomain of your own Cloudflare domain. Best for a long-running node.
 
-That's it. Your node starts and **registers itself with the project as `pending`**.
+The installer writes a **`start`** script (`start.bat` / `start.command` / `start.sh`)
+that launches the tunnel **and** the node together. Your node then **registers with the
+project as `pending`**.
 
-> **No player traffic reaches your node until an admin accepts it.** This is by
-> design: the game only ever contacts nodes in the project's *signed* directory, so
-> an unapproved (or banned) node simply receives nothing.
+> **No player traffic reaches your node until an admin accepts it.** The game only ever
+> contacts nodes in the project's *signed* directory, so an unapproved (or banned) node
+> simply receives nothing.
 
-## Exposing your node
+## Getting online without the installer
 
-Your node listens locally (default port **4400**). To let players reach it you need a
-public HTTPS URL. The easiest, safest option is a **Cloudflare Tunnel** (free, no
-router ports, hides your home IP):
-
-```bash
-# one-time: install cloudflared, then
-cloudflared tunnel --url http://localhost:4400
-```
-
-Cloudflare prints a public `https://…trycloudflare.com` URL — use that as your node's
-**Public URL** during setup (for a permanent URL, create a named tunnel + your own
-domain). Any HTTPS reverse proxy (Caddy, nginx) or port-forward works too.
+If you'd rather wire it up yourself, expose `http://localhost:4400` over HTTPS with a
+Cloudflare Tunnel (`cloudflared tunnel --url http://localhost:4400`), a reverse proxy
+(Caddy/nginx), or a port-forward, and pass that URL as `OH_NODE_PUBLIC_URL`.
 
 ## Getting accepted
 

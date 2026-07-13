@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Open Historia - content node one-click installer (Linux).
-#   chmod +x install.sh && ./install.sh
+# Open Historia - content node one-click installer (macOS).
+# Double-click this file in Finder. If macOS blocks it, right-click -> Open the
+# first time. No Homebrew required.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -9,14 +10,19 @@ REGISTRY_DEFAULT="https://open-historia-registry.nichojkrol.workers.dev"
 
 echo ""
 echo "=============================================="
-echo "  Open Historia - content node setup"
+echo "  Open Historia - content node setup (macOS)"
 echo "  Help players load the game faster."
 echo "=============================================="
 
-# ---- 1. Node.js ----
+# ---- 1. Node.js (no Homebrew - use the official .pkg) ----
 section "1/5  Checking Node.js"
 if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'process.versions.node.split(".")[0]')" -lt 18 ]; then
-  echo "Node.js 18+ is required. Install it from https://nodejs.org/ (or your package manager) and re-run." >&2
+  echo "Node.js 18+ is required and was not found."
+  echo "Opening the official download page - install the macOS Installer (.pkg),"
+  echo "then double-click this installer again. (No Homebrew needed.)"
+  open "https://nodejs.org/en/download/" || true
+  echo ""
+  read -r -p "Press Enter to exit."
   exit 1
 fi
 echo "Node.js $(node --version) found."
@@ -34,7 +40,7 @@ read -r -p "Local port [4400]: " PORT; PORT=${PORT:-4400}
 read -r -p "Registry URL [$REGISTRY_DEFAULT]: " REGISTRY; REGISTRY=${REGISTRY:-$REGISTRY_DEFAULT}
 DIRECTORY="${REGISTRY%/}/node-directory.json"
 
-# ---- 4. Cloudflare Tunnel ----
+# ---- 4. Cloudflare Tunnel (no Homebrew - download the darwin binary) ----
 section "4/5  Cloudflare Tunnel"
 echo "A Cloudflare Tunnel gives your node a public HTTPS address with no router"
 echo "setup and without exposing your IP. It's free."
@@ -43,9 +49,11 @@ PUBLIC_URL=""; TUNNEL_MODE="none"; TUNNEL_NAME=""
 if [[ ! "$USE_TUNNEL" =~ ^[Nn] ]]; then
   if [ ! -x ./cloudflared ]; then
     echo "Downloading cloudflared..."
-    ARCH=$(uname -m); case "$ARCH" in x86_64) CF=amd64;; aarch64|arm64) CF=arm64;; armv7l) CF=arm;; *) CF=amd64;; esac
-    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$CF" -o cloudflared
+    ARCH=$(uname -m); case "$ARCH" in arm64) CF=arm64;; *) CF=amd64;; esac
+    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-$CF.tgz" -o cloudflared.tgz
+    tar xzf cloudflared.tgz
     chmod +x cloudflared
+    rm -f cloudflared.tgz
   fi
   echo "cloudflared ready."
   echo ""
@@ -70,7 +78,7 @@ fi
 section "5/5  Downloading map content (~160 MB, one time)"
 npm run populate || echo "Some content failed; re-run 'npm run populate' later."
 
-# ---- Write start.sh ----
+# ---- Write start.command (double-clickable) ----
 {
   echo '#!/usr/bin/env bash'
   echo 'cd "$(dirname "$0")"'
@@ -90,14 +98,14 @@ npm run populate || echo "Some content failed; re-run 'npm run populate' later."
     echo "./cloudflared tunnel run --url http://localhost:$PORT \"$TUNNEL_NAME\" &"
   fi
   echo 'exec node node.js'
-} > start.sh
-chmod +x start.sh
+} > start.command
+chmod +x start.command
 
 echo ""
 echo "================= Setup complete! ================="
-echo "  1. Start your node any time: ./start.sh"
+echo "  1. Start your node any time: double-click start.command"
 echo "  2. It registers with the project as 'pending'."
 echo "  3. Ask an admin to accept it - then players use it automatically."
 echo "==================================================="
 read -r -p "Start the node now? (y/N) " START_NOW
-if [[ "$START_NOW" =~ ^[Yy] ]]; then exec ./start.sh; fi
+if [[ "$START_NOW" =~ ^[Yy] ]]; then exec ./start.command; fi
