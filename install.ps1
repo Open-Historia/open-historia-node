@@ -35,7 +35,34 @@ if ($LASTEXITCODE -ne 0) { Read-Host "npm install failed. Press Enter to exit"; 
 Section "3/5  A few questions"
 Write-Host "(press Enter to accept the default in [brackets])"
 $operator  = Read-Host "Your name or handle (shown to the admin, optional)"
-$region    = Read-Host "Region, e.g. us-east / eu-west (optional)"
+
+# Region is required - it decides which players get routed to your node.
+$regions = @(
+  @{code="us-east";      label="North America - East"},
+  @{code="us-central";   label="North America - Central"},
+  @{code="us-west";      label="North America - West"},
+  @{code="sa-east";      label="South America"},
+  @{code="eu-west";      label="Europe - West"},
+  @{code="eu-central";   label="Europe - Central"},
+  @{code="eu-north";     label="Europe - North"},
+  @{code="me";           label="Middle East"},
+  @{code="af";           label="Africa"},
+  @{code="ap-south";     label="Asia - South (India)"},
+  @{code="ap-southeast"; label="Asia - Southeast"},
+  @{code="ap-east";      label="Asia - East"},
+  @{code="oceania";      label="Oceania (Australia / NZ)"}
+)
+Write-Host "Select the region your node serves:"
+for ($i = 0; $i -lt $regions.Count; $i++) { Write-Host ("  {0,2}) {1}" -f ($i + 1), $regions[$i].label) }
+do {
+  $sel = Read-Host "Enter a number (1-$($regions.Count))"
+  $n = 0
+  $ok = [int]::TryParse($sel, [ref]$n) -and $n -ge 1 -and $n -le $regions.Count
+  if (-not $ok) { Write-Host "Please enter a number between 1 and $($regions.Count)." -ForegroundColor Yellow }
+} while (-not $ok)
+$region = $regions[$n - 1].code
+Write-Host ("Region: {0}" -f $region) -ForegroundColor Green
+
 $port      = Read-Host "Local port [4400]"; if ([string]::IsNullOrWhiteSpace($port)) { $port = "4400" }
 $registry  = Read-Host "Registry URL [https://open-historia-registry.nichojkrol.workers.dev]"
 if ([string]::IsNullOrWhiteSpace($registry)) { $registry = "https://open-historia-registry.nichojkrol.workers.dev" }

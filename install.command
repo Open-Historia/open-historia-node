@@ -35,7 +35,23 @@ npm install --omit=dev
 section "3/5  A few questions"
 echo "(press Enter to accept the default in [brackets])"
 read -r -p "Your name or handle (optional): " OPERATOR
-read -r -p "Region, e.g. us-east / eu-west (optional): " REGION
+
+# Region is required - it decides which players get routed to your node.
+REGION_CODES=(us-east us-central us-west sa-east eu-west eu-central eu-north me af ap-south ap-southeast ap-east oceania)
+REGION_LABELS=("North America - East" "North America - Central" "North America - West" "South America" "Europe - West" "Europe - Central" "Europe - North" "Middle East" "Africa" "Asia - South (India)" "Asia - Southeast" "Asia - East" "Oceania (Australia / NZ)")
+echo "Select the region your node serves:"
+for i in "${!REGION_LABELS[@]}"; do printf "  %2d) %s\n" "$((i+1))" "${REGION_LABELS[$i]}"; done
+REGION=""
+while [ -z "$REGION" ]; do
+  read -r -p "Enter a number (1-${#REGION_CODES[@]}): " n
+  if [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le "${#REGION_CODES[@]}" ]; then
+    REGION="${REGION_CODES[$((n-1))]}"
+  else
+    echo "Please enter a number between 1 and ${#REGION_CODES[@]}."
+  fi
+done
+echo "Region: $REGION"
+
 read -r -p "Local port [4400]: " PORT; PORT=${PORT:-4400}
 read -r -p "Registry URL [$REGISTRY_DEFAULT]: " REGISTRY; REGISTRY=${REGISTRY:-$REGISTRY_DEFAULT}
 DIRECTORY="${REGISTRY%/}/node-directory.json"
