@@ -390,7 +390,7 @@ const server = app.listen(...listenArgs, async () => {
   if (PUBLIC_URL) console.log(`Public URL: ${PUBLIC_URL}`);
   console.log(
     REGISTRY_URL && PUBLIC_URL
-      ? `Registry: ${REGISTRY_URL} — registering as pending (an admin must accept this node).`
+      ? `Registry: ${REGISTRY_URL} — registering (nodes are accepted automatically; an admin can ban via the panel).`
       : "Not registering: OH_NODE_REGISTRY_URL and OH_NODE_PUBLIC_URL must both be set (the installer's Cloudflare Tunnel does this). No player traffic reaches an unregistered node.",
   );
   // Startup tasks must never crash the node (Node aborts on an unhandled rejection).

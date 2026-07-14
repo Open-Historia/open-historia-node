@@ -100,8 +100,12 @@ const fetchSwVersion = async () => {
   } catch { return 0; }
 };
 
-const run = (cmd, args) => {
-  const r = spawnSync(cmd, args, { cwd: REPO_ROOT, stdio: "inherit", shell: process.platform === "win32" });
+// Run a hardcoded command line in the repo root. Uses shell:true with a single
+// STRING (not an args array) to avoid Node's DEP0190 warning and to resolve
+// git/npm on Windows via PATHEXT. Every command line here is constant — no
+// untrusted input is interpolated — so shell concatenation is safe.
+const run = (commandLine) => {
+  const r = spawnSync(commandLine, { cwd: REPO_ROOT, stdio: "inherit", shell: true });
   return r.status === 0;
 };
 
@@ -118,10 +122,13 @@ const applyUpdate = async () => {
     return;
   }
   console.log(`Applying node software update v${target}…`);
-  const pulled = run("git", ["pull", "--ff-only"]) ||
-    (run("git", ["fetch", "origin", "main"]) && run("git", ["reset", "--hard", "origin/main"]));
-  if (!pulled) { console.warn("git pull failed — staying on the current version, will retry next cycle."); return; }
-  run("npm", ["install", "--omit=dev"]);
+  // Update to origin/main explicitly (branch-config agnostic — a checkout whose
+  // local branch tracks 'master' would otherwise break `git pull`). Fast-forward
+  // if possible, else hard-reset (a node has no local changes to keep).
+  const updated = run("git fetch origin main") &&
+    (run("git merge --ff-only origin/main") || run("git reset --hard origin/main"));
+  if (!updated) { console.warn("git update failed — staying on the current version, will retry next cycle."); return; }
+  run("npm install --omit=dev");
   writeAppliedSw(target);
   console.log(`Node software updated to v${target}.`);
 };
