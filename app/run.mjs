@@ -119,8 +119,18 @@ const SW_STATE = path.join(__dirname, ".node-version.json");
 const readAppliedSw = () => { try { return Number(JSON.parse(readFileSync(SW_STATE, "utf8")).swVersion) || 0; } catch { return 0; } };
 const writeAppliedSw = (v) => { try { writeFileSync(SW_STATE, `${JSON.stringify({ swVersion: v, appliedAt: new Date().toISOString() }, null, 2)}\n`); } catch { /* best-effort */ } };
 
-// Fetch + cryptographically verify the signed directory; return its swVersion
-// (0 if unset/unreachable/invalid — an unverified directory can never trigger an update).
+// This node's id, from the identity server.js writes on first run. Used to find
+// this node's own entry in the signed directory for per-node update targeting.
+const nodeId = () => {
+  try { return JSON.parse(readFileSync(path.join(DATA_DIR, "identity.json"), "utf8")).id || null; }
+  catch { return null; }
+};
+
+// Fetch + cryptographically verify the signed directory; return the software
+// version this node should run — the HIGHER of the directory-wide swVersion
+// ("Update all nodes") and this node's own swVersion ("Update this node"). Returns
+// 0 if unset/unreachable/invalid — an unverified directory can never trigger an
+// update. Mirrors server.js's refreshControl so the two agree on the target.
 const fetchSwVersion = async () => {
   const dirUrl = cfg.directory;
   if (!dirUrl) return 0;
@@ -136,7 +146,10 @@ const fetchSwVersion = async () => {
     const bytes = Buffer.from(await docRes.arrayBuffer());
     const { verifySignedManifest } = await import("./lib/trust.js");
     const { valid, data } = verifySignedManifest(bytes, await sigRes.text());
-    return valid ? (Number(data.swVersion) || 0) : 0;
+    if (!valid) return 0;
+    const id = nodeId();
+    const self = id ? (data.nodes || []).find((n) => n.id === id) : null;
+    return Math.max(Number(data.swVersion) || 0, Number(self?.swVersion) || 0);
   } catch { return 0; }
 };
 

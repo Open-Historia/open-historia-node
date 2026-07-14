@@ -415,13 +415,16 @@ const refreshControl = async () => {
       return;
     }
     void base;
-    // Software-update signal (admin bumped swVersion in the signed, verified
-    // directory). Exit so the run.mjs supervisor pulls the new code + restarts.
-    if (allowUpdateRestart && (Number(data.swVersion) || 0) > appliedSwVersion()) {
-      console.log(`Node software update v${Number(data.swVersion)} requested — restarting to apply…`);
+    // A node runs whichever software version is higher: the directory-wide
+    // swVersion ("Update all nodes") or its own per-node swVersion ("Update" on
+    // just this node). Both live in the SIGNED directory, so neither can be forged.
+    const self = (data.nodes || []).find((n) => n.id === identity.id);
+    const targetSw = Math.max(Number(data.swVersion) || 0, Number(self?.swVersion) || 0);
+    // Software-update signal — exit so the run.mjs supervisor pulls new code + restarts.
+    if (allowUpdateRestart && targetSw > appliedSwVersion()) {
+      console.log(`Node software update v${targetSw} requested — restarting to apply…`);
       process.exit(UPDATE_EXIT_CODE);
     }
-    const self = (data.nodes || []).find((n) => n.id === identity.id);
     if (!self) {
       control.status = "active"; // auto-accepted: not listed = not banned = active
       control.rateLimit = DEFAULT_RATE_LIMIT;
