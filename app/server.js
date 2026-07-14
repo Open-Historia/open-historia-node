@@ -60,8 +60,8 @@ const statusBody = () => {
   // registration (to the private admin record), never broadcast to players. While
   // draining we report "draining"/full so clients move to another node.
   return {
-    id: identity.id, region: REGION, version: NODE_VERSION, status: draining ? "draining" : control.status,
-    threads: THREADS, maxUsers: MAX_USERS, currentUsers: users, full: draining || users >= MAX_USERS,
+    id: identity.id, region: REGION, version: NODE_VERSION, status: isDraining() ? "draining" : control.status,
+    threads: THREADS, maxUsers: MAX_USERS, currentUsers: users, full: isDraining() || users >= MAX_USERS,
   };
 };
 
@@ -90,10 +90,26 @@ const identity = loadIdentity();
 // downgrades us to paused/banned.
 const control = { status: "active", rateLimit: DEFAULT_RATE_LIMIT, redirect: null };
 
-// Operator-dashboard metrics + graceful-drain flag. While draining, the node
-// stops serving content (so players fail over to other nodes) and then exits.
+// Operator-dashboard metrics + drain state. A node is "draining" when it's
+// shutting down, or the signed directory has paused/banned it. While draining it
+// KEEPS serving content (so nobody is cut off mid-session) but advertises
+// "draining"/full in its status, so clients gracefully move players to another
+// node on their own. The client also stops selecting it (banned/paused are
+// filtered from the signed directory), so it simply sheds its players and idles.
 const stats = { startedAt: Date.now(), requests: 0, bytes: 0, peakUsers: 0 };
-let draining = false;
+let shuttingDown = false;
+const isDraining = () => shuttingDown || control.status === "banned" || control.status === "paused";
+const statsPayload = () => {
+  const users = currentUsers();
+  if (users > stats.peakUsers) stats.peakUsers = users;
+  return {
+    id: identity.id, region: REGION, version: NODE_VERSION,
+    status: isDraining() ? "draining" : control.status, draining: isDraining(),
+    currentUsers: users, maxUsers: MAX_USERS, peakUsers: stats.peakUsers, threads: THREADS,
+    requests: stats.requests, bytes: stats.bytes, contentObjects: listContentHashes().length,
+    uptimeMs: Date.now() - stats.startedAt,
+  };
+};
 
 // Applied node-software version (written by run.mjs after an update). When the
 // signed directory's swVersion climbs past this, we exit 75 so run.mjs pulls the
@@ -215,6 +231,14 @@ app.get("/oh/v1/status", (req, res) => {
   res.json(statusBody());
 });
 
+// Fuller operational stats for the admin panel (players, peak, requests served,
+// data served, map objects, uptime). Public + a pure read (does NOT count the
+// caller). No operator name — that stays in the private registration record.
+app.get("/oh/v1/stats", (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json(statsPayload());
+});
+
 // Heartbeat: the client calls this on connect and periodically while playing,
 // so this player counts toward the node's live user count until they leave.
 app.get("/oh/v1/ping", (req, res) => {
@@ -225,7 +249,9 @@ app.get("/oh/v1/ping", (req, res) => {
 
 // Honest nodes stop serving content when the signed directory says they're
 // paused/banned. (Clients already won't route to them; this is a courtesy.)
-const serveable = () => !draining && (control.status === "active" || control.status === "pending");
+// Serve in every normal AND draining state — a draining node keeps serving so
+// players aren't cut off mid-session; clients move them via the "draining" status.
+const serveable = () => isDraining() || control.status === "active" || control.status === "pending";
 
 app.get("/oh/v1/content/:hash", async (req, res) => {
   if (!serveable()) return res.status(503).json({ error: `Node is ${control.status}.` });
@@ -424,8 +450,8 @@ let dashboardHtml = "";
 try { dashboardHtml = fs.readFileSync(path.join(__dirname, "dashboard.html"), "utf8"); } catch { /* fall back to a plain message */ }
 
 const gracefulShutdown = () => {
-  if (draining) return;
-  draining = true; // content now 503s → players fail over to another node
+  if (shuttingDown) return;
+  shuttingDown = true; // keeps serving, but advertises "draining" so players move off
   console.log(`Graceful shutdown: draining for ${Math.round(DRAIN_MS / 1000)}s so players move to other nodes…`);
   setTimeout(() => { console.log("Node shut down."); process.exit(0); }, DRAIN_MS);
 };
@@ -434,14 +460,7 @@ const dash = express();
 dash.disable("x-powered-by");
 dash.get("/stats", (req, res) => {
   res.setHeader("Cache-Control", "no-store");
-  const users = currentUsers();
-  if (users > stats.peakUsers) stats.peakUsers = users;
-  res.json({
-    id: identity.id, region: REGION, version: NODE_VERSION, status: control.status, draining,
-    currentUsers: users, maxUsers: MAX_USERS, peakUsers: stats.peakUsers, threads: THREADS,
-    requests: stats.requests, bytes: stats.bytes, contentObjects: listContentHashes().length,
-    uptimeMs: Date.now() - stats.startedAt, publicUrl: PUBLIC_URL, dashboardPort: DASHBOARD_PORT,
-  });
+  res.json({ ...statsPayload(), publicUrl: PUBLIC_URL, dashboardPort: DASHBOARD_PORT });
 });
 dash.post("/shutdown", (req, res) => { res.json({ ok: true, draining: true }); gracefulShutdown(); });
 dash.get("/", (req, res) => {
