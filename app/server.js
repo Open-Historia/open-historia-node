@@ -83,8 +83,10 @@ const loadIdentity = () => {
 };
 const identity = loadIdentity();
 
-// Live control state, refreshed from the signed directory.
-const control = { status: "pending", rateLimit: DEFAULT_RATE_LIMIT, redirect: null };
+// Live control state, refreshed from the signed directory. Nodes are accepted
+// automatically, so we default to active; the signed directory only ever
+// downgrades us to paused/banned.
+const control = { status: "active", rateLimit: DEFAULT_RATE_LIMIT, redirect: null };
 
 // Applied node-software version (written by run.mjs after an update). When the
 // signed directory's swVersion climbs past this, we exit 75 so run.mjs pulls the
@@ -358,7 +360,7 @@ const refreshControl = async () => {
     }
     const self = (data.nodes || []).find((n) => n.id === identity.id);
     if (!self) {
-      control.status = "pending"; // accepted nodes appear here; not listed = pending
+      control.status = "active"; // auto-accepted: not listed = not banned = active
       control.rateLimit = DEFAULT_RATE_LIMIT;
       control.redirect = null;
       return;
