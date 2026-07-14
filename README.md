@@ -72,7 +72,7 @@ You can check your node's status any time at `http://localhost:4400/oh/v1/health
 
 ## Keeping it running
 
-- **On boot / as a service:** wrap `node node.js` (with the env from `start.bat`/
+- **On boot / as a service:** wrap `node server.js` (with the env from `start.bat`/
   `start.sh`) in a Windows service (e.g. [WinSW](https://github.com/winsw/winsw)) or a
   systemd unit so it restarts automatically.
 - **Auto-update:** run the updater alongside the node to stay current and tamper-proof:

@@ -55,4 +55,4 @@ const startTunnel = () => new Promise((resolve) => {
 
 const url = await startTunnel();
 if (url) process.env.OH_NODE_PUBLIC_URL = url;
-await import("./node.js");
+await import("./server.js");

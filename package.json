@@ -5,10 +5,10 @@
   "type": "module",
   "license": "MIT",
   "bin": {
-    "open-historia-node": "node.js"
+    "open-historia-node": "server.js"
   },
   "scripts": {
-    "start": "node node.js",
+    "start": "node server.js",
     "populate": "node scripts/populate.mjs",
     "update": "node scripts/updater.mjs"
   },
