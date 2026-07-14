@@ -10,7 +10,9 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cfgPath = path.join(__dirname, "node.config.json");
-const cfg = existsSync(cfgPath) ? JSON.parse(readFileSync(cfgPath, "utf8")) : {};
+// Strip a UTF-8 BOM if present — some editors/tools (e.g. PowerShell) write one,
+// and JSON.parse rejects it. Tolerate it so the node always starts.
+const cfg = existsSync(cfgPath) ? JSON.parse(readFileSync(cfgPath, "utf8").replace(/^﻿/, "")) : {};
 
 process.env.OH_NODE_PORT = String(cfg.port || process.env.OH_NODE_PORT || 4400);
 if (cfg.operator) process.env.OH_NODE_OPERATOR = cfg.operator;

@@ -116,7 +116,9 @@ $config = [ordered]@{
   registry = $registry; directory = $directory
   tunnel = $tunnelMode; tunnelName = $tunnelName; publicUrl = $publicUrl
 }
-($config | ConvertTo-Json) | Set-Content -Path (Join-Path $PSScriptRoot "node.config.json") -Encoding UTF8
+# Write UTF-8 WITHOUT a BOM — PowerShell 5.1's "-Encoding UTF8" adds a BOM that
+# breaks JSON.parse in Node, so write the bytes ourselves.
+[System.IO.File]::WriteAllText((Join-Path $PSScriptRoot "node.config.json"), ($config | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
 $startBat = @"
 @echo off
 cd /d "%~dp0"
