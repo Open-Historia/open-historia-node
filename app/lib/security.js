@@ -2,6 +2,22 @@
 // Pure, dependency-light helpers for path containment and HTTP Range parsing.
 import path from "node:path";
 
+// SSRF guard for the community-content mirror: a node will lazily fetch + cache a
+// bundle ONLY from these hosts (GitHub, where the community hub stores scenario /
+// basemap bundles). Content-addressing is the real safety net — the node discards
+// anything whose sha256 doesn't match the requested hash — but the host allow-list
+// keeps a node from being turned into a generic outbound proxy. Mirrors the
+// registry Worker's hub allow-list.
+const MIRROR_HOSTS = new Set([
+  "github.com", "raw.githubusercontent.com", "objects.githubusercontent.com",
+  "user-images.githubusercontent.com", "user-attachments.githubusercontent.com",
+]);
+export const isAllowedMirrorUrl = (value) => {
+  let u;
+  try { u = new URL(String(value)); } catch { return false; }
+  return u.protocol === "https:" && (MIRROR_HOSTS.has(u.hostname) || u.hostname.endsWith(".githubusercontent.com"));
+};
+
 // A child name must resolve to a DIRECT child of baseDir (blocks "../", separators,
 // absolute paths). Throws on anything unsafe; returns the absolute path.
 export const resolveChildPath = (baseDir, name, label = "id") => {

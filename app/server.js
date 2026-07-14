@@ -13,8 +13,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { generateKeyPairSync, createPrivateKey, sign as cryptoSign, randomUUID } from "node:crypto";
-import { parseByteRange } from "./lib/security.js";
+import { generateKeyPairSync, createPrivateKey, createHash, sign as cryptoSign, randomUUID } from "node:crypto";
+import { parseByteRange, isAllowedMirrorUrl } from "./lib/security.js";
 import { verifySignedManifest } from "./lib/trust.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -104,6 +104,58 @@ const listContentHashes = () => {
   }
 };
 
+// --- Community-content mirror: because a node is a content-addressed cache, it
+// can serve community scenarios/basemaps too, not just the canonical map data.
+// On a cache miss the caller points us (?src=) at where the bundle lives; we
+// fetch it from an allow-listed origin, verify its sha256 matches the requested
+// hash, and atomically cache it under content/<hash>. Since the cache key IS the
+// verified hash, a node can never be made to cache or serve anything that doesn't
+// hash to exactly what was asked for. Size- and concurrency-capped so it can't be
+// turned into a bandwidth sink for the volunteer running it. ---
+const MAX_MIRROR_BYTES = 200 * 1024 * 1024;
+const MAX_INFLIGHT_MIRRORS = 4;
+let inflightMirrors = 0;
+
+// Fetch a bundle from an allow-listed origin and cache it under its content hash.
+// Follows redirects manually, re-checking every hop (a redirect:"follow" could
+// chase a GitHub redirect off to an internal host). Returns { buffer, hash } or
+// null. Caching under the COMPUTED hash is always safe: content/<h> is, by
+// definition, exactly the bytes that hash to <h>.
+const fetchAndCacheBundle = async (src) => {
+  if (!isAllowedMirrorUrl(src)) return null;
+  let current = src;
+  let response = null;
+  for (let hop = 0; hop < 6; hop += 1) {
+    response = await fetch(current, { redirect: "manual" });
+    if (response.status < 300 || response.status >= 400) break;
+    const location = response.headers.get("location");
+    if (!location) break;
+    let next;
+    try { next = new URL(location, current).toString(); } catch { return null; }
+    if (!isAllowedMirrorUrl(next)) return null;
+    current = next;
+  }
+  if (!response || !response.ok) return null;
+  const declared = Number(response.headers.get("content-length") || 0);
+  if (declared && declared > MAX_MIRROR_BYTES) return null;
+  const buffer = Buffer.from(await response.arrayBuffer());
+  if (buffer.length > MAX_MIRROR_BYTES) return null;
+  const hash = createHash("sha256").update(buffer).digest("hex");
+  try {
+    const tmp = path.join(CONTENT_DIR, `.mirror-${hash}-${randomUUID()}.tmp`);
+    fs.writeFileSync(tmp, buffer);
+    fs.renameSync(tmp, path.join(CONTENT_DIR, hash)); // atomic publish under the verified hash
+  } catch { /* caching is best-effort; still return the bytes */ }
+  return { buffer, hash };
+};
+
+// Hash-addressed mirror: cache the bundle and report whether it matched the hash
+// the caller asked for (so /content/<hash>?src= only 404s, never serves a mismatch).
+const mirrorCommunityContent = async (hash, src) => {
+  const result = await fetchAndCacheBundle(src);
+  return !!result && result.hash === hash;
+};
+
 const app = express();
 app.disable("x-powered-by");
 
@@ -143,7 +195,7 @@ app.get("/oh/v1/health", (req, res) => {
 
 app.get("/oh/v1/manifest", (req, res) => {
   res.setHeader("Cache-Control", "no-store");
-  res.json({ id: identity.id, version: NODE_VERSION, caps: ["content"], status: control.status, hashes: listContentHashes() });
+  res.json({ id: identity.id, version: NODE_VERSION, caps: ["content", "mirror"], status: control.status, hashes: listContentHashes() });
 });
 
 // Live status the client uses to pick the best node (latency + free capacity).
@@ -166,15 +218,31 @@ app.get("/oh/v1/ping", (req, res) => {
 // paused/banned. (Clients already won't route to them; this is a courtesy.)
 const serveable = () => control.status === "active" || control.status === "pending";
 
-app.get("/oh/v1/content/:hash", (req, res) => {
+app.get("/oh/v1/content/:hash", async (req, res) => {
   if (!serveable()) return res.status(503).json({ error: `Node is ${control.status}.` });
   touchUser(req); // fetching content counts you as an active player of this node
   const hash = String(req.params.hash || "").toLowerCase();
   if (!HASH_RE.test(hash)) return res.status(400).json({ error: "Invalid content hash." });
 
   const filePath = path.join(CONTENT_DIR, hash);
-  if (path.dirname(path.resolve(filePath)) !== CONTENT_DIR || !fs.existsSync(filePath)) {
-    return res.status(404).json({ error: "Content not found." });
+  if (path.dirname(path.resolve(filePath)) !== CONTENT_DIR) {
+    return res.status(400).json({ error: "Invalid content hash." });
+  }
+  if (!fs.existsSync(filePath)) {
+    // Cache miss. If the caller tells us where this hash lives (community content),
+    // lazily mirror + verify + cache it; otherwise it's simply not on this node.
+    const src = req.query.src ? String(req.query.src) : "";
+    if (!src) return res.status(404).json({ error: "Content not found." });
+    if (inflightMirrors >= MAX_INFLIGHT_MIRRORS) {
+      res.setHeader("Retry-After", "5");
+      return res.status(503).json({ error: "Node busy; retry shortly." });
+    }
+    inflightMirrors += 1;
+    let mirrored = false;
+    try { mirrored = await mirrorCommunityContent(hash, src); }
+    catch { mirrored = false; }
+    finally { inflightMirrors -= 1; }
+    if (!mirrored) return res.status(404).json({ error: "Content not found." });
   }
 
   const { size } = fs.statSync(filePath);
@@ -200,6 +268,37 @@ app.get("/oh/v1/content/:hash", (req, res) => {
   return fs.createReadStream(filePath, { start: range.start, end: range.end }).pipe(res);
 });
 
+// URL-based community-content proxy: the browser can't fetch GitHub-hosted
+// scenario/basemap bundles directly (no CORS), so it asks a node to fetch one
+// server-side and return it with CORS — offloading that from the central hub
+// proxy. The bytes are cached under their content hash too, and that hash is
+// returned (X-OH-Content-Hash) so a caller can verify or re-fetch by hash later.
+app.get("/oh/v1/hub", async (req, res) => {
+  if (!serveable()) return res.status(503).json({ error: `Node is ${control.status}.` });
+  touchUser(req);
+  const src = req.query.url ? String(req.query.url) : "";
+  if (!isAllowedMirrorUrl(src)) return res.status(400).json({ error: "Only GitHub-hosted URLs are allowed." });
+  if (inflightMirrors >= MAX_INFLIGHT_MIRRORS) {
+    res.setHeader("Retry-After", "5");
+    return res.status(503).json({ error: "Node busy; retry shortly." });
+  }
+  inflightMirrors += 1;
+  try {
+    const result = await fetchAndCacheBundle(src);
+    if (!result) return res.status(502).json({ error: "Could not fetch that bundle." });
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader("Content-Length", String(result.buffer.length));
+    res.setHeader("X-OH-Content-Hash", result.hash);
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    if (req.method === "HEAD") return res.status(200).end();
+    return res.status(200).end(result.buffer);
+  } catch {
+    return res.status(502).json({ error: "Could not fetch that bundle." });
+  } finally {
+    inflightMirrors -= 1;
+  }
+});
+
 app.use((req, res) => res.status(404).json({ error: "Not found." }));
 
 // --- Self-registration: announce this node to the project registry as pending.
@@ -210,7 +309,7 @@ const register = async () => {
     id: identity.id,
     url: PUBLIC_URL,
     publicKey: identity.publicKey,
-    caps: ["content"],
+    caps: ["content", "mirror"],
     operator: OPERATOR,
     region: REGION,
     version: NODE_VERSION,
