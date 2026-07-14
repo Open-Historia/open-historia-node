@@ -9,7 +9,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const cfgPath = path.join(__dirname, "node.config.json");
+// The backend lives in app/; the operator-facing config and the install/start
+// scripts sit one level up at the repo root, so node.config.json (and the .git
+// the auto-updater pulls into) is a sibling of app/, not inside it.
+const REPO_ROOT = path.join(__dirname, "..");
+const cfgPath = path.join(REPO_ROOT, "node.config.json");
 // Strip a UTF-8 BOM if present — some editors/tools (e.g. PowerShell) write one,
 // and JSON.parse rejects it. Tolerate it so the node always starts.
 const cfg = existsSync(cfgPath) ? JSON.parse(readFileSync(cfgPath, "utf8").replace(/^﻿/, "")) : {};
@@ -97,7 +101,7 @@ const fetchSwVersion = async () => {
 };
 
 const run = (cmd, args) => {
-  const r = spawnSync(cmd, args, { cwd: __dirname, stdio: "inherit", shell: process.platform === "win32" });
+  const r = spawnSync(cmd, args, { cwd: REPO_ROOT, stdio: "inherit", shell: process.platform === "win32" });
   return r.status === 0;
 };
 
@@ -107,7 +111,7 @@ const run = (cmd, args) => {
 const applyUpdate = async () => {
   const target = await fetchSwVersion();
   if (target <= readAppliedSw()) return; // nothing newer (or unverifiable)
-  if (!existsSync(path.join(__dirname, ".git"))) {
+  if (!existsSync(path.join(REPO_ROOT, ".git"))) {
     console.warn(`Update v${target} was requested, but this node isn't a git checkout — automatic updates need one.`);
     console.warn("Re-install with:  git clone https://github.com/Open-Historia/open-historia-node   (or re-download the latest release).");
     writeAppliedSw(target); // don't loop on an update we can't apply
