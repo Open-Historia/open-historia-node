@@ -247,6 +247,18 @@ app.get("/oh/v1/ping", (req, res) => {
   res.json(statusBody());
 });
 
+// Wake-up: the admin panel hits this right after banning/pausing/updating so the
+// node re-reads the SIGNED directory at once instead of waiting for its next poll.
+// Unauthenticated + debounced — it only makes the node re-check the signed
+// authority (the source of truth), so a stray call can't do anything but that.
+let lastWake = 0;
+app.get("/oh/v1/refresh", (req, res) => {
+  const now = Date.now();
+  if (now - lastWake > 3000) { lastWake = now; refreshControl().catch(() => {}); }
+  res.setHeader("Cache-Control", "no-store");
+  res.json({ ok: true });
+});
+
 // Honest nodes stop serving content when the signed directory says they're
 // paused/banned. (Clients already won't route to them; this is a courtesy.)
 // Serve in every normal AND draining state — a draining node keeps serving so
