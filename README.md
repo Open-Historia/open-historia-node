@@ -54,6 +54,22 @@ project as `pending`**.
 > contacts nodes in the project's *signed* directory, so an unapproved (or banned) node
 > simply receives nothing.
 
+## What's in the folder
+
+Everything you touch is at the **top level**: the installers
+(`install.bat` / `install.command` / `install.sh`), the **`start`** script the
+installer creates, and your **`node.config.json`** (your node's name, region, and
+tunnel). All of the node's code and its downloaded map cache live in the
+**`app/`** folder — you never need to open it.
+
+```
+open-historia-node/
+├─ install.bat / install.command / install.sh   ← run one of these first
+├─ start.bat / start.command / start.sh          ← created by the installer
+├─ node.config.json                              ← your settings
+└─ app/                                           ← the node software (leave it be)
+```
+
 ## Getting online without the installer
 
 If you'd rather wire it up yourself, expose `http://localhost:4400` over HTTPS with a
@@ -72,16 +88,13 @@ You can check your node's status any time at `http://localhost:4400/oh/v1/health
 
 ## Keeping it running
 
-- **On boot / as a service:** wrap `node server.js` (with the env from `start.bat`/
-  `start.sh`) in a Windows service (e.g. [WinSW](https://github.com/winsw/winsw)) or a
-  systemd unit so it restarts automatically.
-- **Auto-update:** run the updater alongside the node to stay current and tamper-proof:
-  ```bash
-  OH_UPDATE_BASE_URL=<signed update feed> node scripts/updater.mjs
-  ```
-  It only ever applies updates that are validly **signed** by the project, strictly
-  newer than what you run (no rollback), and unexpired.
-- **Refresh content** after a map update: `npm run populate`.
+- **On boot / as a service:** wrap the `start` script (or `node app/run.mjs`) in a
+  Windows service (e.g. [WinSW](https://github.com/winsw/winsw)) or a systemd unit so
+  it restarts automatically. `run.mjs` supervises the node and applies signed updates.
+- **Auto-update:** the node updates itself when an admin publishes a new signed version
+  (it `git pull`s and restarts, keeping your tunnel up). No action needed. A standalone
+  signed-feed updater is also available: `node app/scripts/updater.mjs`.
+- **Refresh content** after a map update: `node app/scripts/populate.mjs`.
 
 ## Configuration
 
@@ -97,7 +110,7 @@ The node reads these environment variables (the installer bakes your answers int
 | `OH_NODE_OPERATOR` | — | Your name/handle (shown to admins) |
 | `OH_NODE_REGION` | — | Region hint, e.g. `eu-west` |
 | `OH_NODE_RATE_LIMIT` | `600` | Requests/minute/IP (admins can tighten this) |
-| `OH_NODE_CONTENT_DIR` | `./content` | Where verified map objects are stored |
+| `OH_NODE_CONTENT_DIR` | `./app/content` | Where verified map objects are stored |
 
 ## Endpoints
 

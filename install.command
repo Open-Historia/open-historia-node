@@ -29,7 +29,7 @@ echo "Node.js $(node --version) found."
 
 # ---- 2. Dependencies ----
 section "2/5  Installing dependencies"
-npm install --omit=dev
+( cd app && npm install --omit=dev )
 
 # ---- 3. Your details ----
 section "3/5  A few questions"
@@ -63,13 +63,13 @@ echo "setup and without exposing your IP. It's free."
 read -r -p "Set up a Cloudflare Tunnel now? [Y/n] " USE_TUNNEL
 PUBLIC_URL=""; TUNNEL_MODE="none"; TUNNEL_NAME=""
 if [[ ! "$USE_TUNNEL" =~ ^[Nn] ]]; then
-  if [ ! -x ./cloudflared ]; then
+  if [ ! -x app/cloudflared ]; then
     echo "Downloading cloudflared..."
     ARCH=$(uname -m); case "$ARCH" in arm64) CF=arm64;; *) CF=amd64;; esac
-    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-$CF.tgz" -o cloudflared.tgz
-    tar xzf cloudflared.tgz
-    chmod +x cloudflared
-    rm -f cloudflared.tgz
+    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-$CF.tgz" -o app/cloudflared.tgz
+    tar xzf app/cloudflared.tgz -C app
+    chmod +x app/cloudflared
+    rm -f app/cloudflared.tgz
   fi
   echo "cloudflared ready."
   echo ""
@@ -78,11 +78,11 @@ if [[ ! "$USE_TUNNEL" =~ ^[Nn] ]]; then
   read -r -p "Choose 1 (quick) or 2 (named) [1]: " KIND
   if [ "$KIND" = "2" ]; then
     echo "A browser will open to log in to Cloudflare..."
-    ./cloudflared tunnel login
+    app/cloudflared tunnel login
     read -r -p "Name for this tunnel [oh-node]: " TUNNEL_NAME; TUNNEL_NAME=${TUNNEL_NAME:-oh-node}
-    ./cloudflared tunnel create "$TUNNEL_NAME"
+    app/cloudflared tunnel create "$TUNNEL_NAME"
     read -r -p "Hostname (a subdomain of your Cloudflare domain, e.g. node.example.com): " HOST1
-    ./cloudflared tunnel route dns "$TUNNEL_NAME" "$HOST1"
+    app/cloudflared tunnel route dns "$TUNNEL_NAME" "$HOST1"
     PUBLIC_URL="https://$HOST1"; TUNNEL_MODE="named"
     echo "Named tunnel ready at $PUBLIC_URL"
   else
@@ -92,7 +92,7 @@ fi
 
 # ---- 5. Map content ----
 section "5/5  Downloading map content (~160 MB, one time)"
-npm run populate || echo "Some content failed; re-run 'npm run populate' later."
+node app/scripts/populate.mjs || echo "Some content failed; re-run 'node app/scripts/populate.mjs' later."
 
 # ---- Write config + start.command (run.mjs starts the tunnel + node) ----
 cat > node.config.json <<EOF
@@ -110,7 +110,7 @@ EOF
 cat > start.command <<'EOF'
 #!/usr/bin/env bash
 cd "$(dirname "$0")"
-exec node run.mjs
+exec node app/run.mjs
 EOF
 chmod +x start.command
 

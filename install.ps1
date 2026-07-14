@@ -28,8 +28,11 @@ try {
 
 # ---- 2. Dependencies ----
 Section "2/5  Installing dependencies"
+Push-Location (Join-Path $PSScriptRoot "app")
 npm install --omit=dev
-if ($LASTEXITCODE -ne 0) { Read-Host "npm install failed. Press Enter to exit"; exit 1 }
+$installOk = $LASTEXITCODE -eq 0
+Pop-Location
+if (-not $installOk) { Read-Host "npm install failed. Press Enter to exit"; exit 1 }
 
 # ---- 3. Your details ----
 Section "3/5  A few questions"
@@ -77,7 +80,7 @@ $publicUrl = ""
 $tunnelMode = "none"
 $tunnelName = ""
 if ($useTunnel -notmatch "^[Nn]") {
-  $cf = Join-Path $PSScriptRoot "cloudflared.exe"
+  $cf = Join-Path $PSScriptRoot "app\cloudflared.exe"
   if (-not (Test-Path $cf)) {
     Write-Host "Downloading cloudflared..." -ForegroundColor Cyan
     $arch = if ([Environment]::Is64BitOperatingSystem) { "amd64" } else { "386" }
@@ -107,8 +110,8 @@ if ($useTunnel -notmatch "^[Nn]") {
 
 # ---- 5. Map content ----
 Section "5/5  Downloading map content (~160 MB, one time)"
-npm run populate
-if ($LASTEXITCODE -ne 0) { Write-Host "Some content failed; re-run 'npm run populate' later." -ForegroundColor Yellow }
+node app\scripts\populate.mjs
+if ($LASTEXITCODE -ne 0) { Write-Host "Some content failed; re-run 'node app\scripts\populate.mjs' later." -ForegroundColor Yellow }
 
 # ---- Write config + start.bat (run.mjs starts the tunnel + node reliably) ----
 $config = [ordered]@{
@@ -122,7 +125,7 @@ $config = [ordered]@{
 $startBat = @"
 @echo off
 cd /d "%~dp0"
-node run.mjs
+node app\run.mjs
 pause
 "@
 Set-Content -Path (Join-Path $PSScriptRoot "start.bat") -Value $startBat -Encoding ASCII
