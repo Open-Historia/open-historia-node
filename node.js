@@ -10,6 +10,7 @@
 
 import express from "express";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { generateKeyPairSync, createPrivateKey, sign as cryptoSign, randomUUID } from "node:crypto";
@@ -31,6 +32,34 @@ const REGION = env("OH_NODE_REGION", "");
 const DEFAULT_RATE_LIMIT = Number(env("OH_NODE_RATE_LIMIT", 600)); // requests/min/IP
 const NODE_VERSION = 1;
 const HASH_RE = /^[a-f0-9]{64}$/;
+
+// --- Capacity: how many players this node will host at once, scaled by the
+// machine's CPU threads (each thread comfortably serves several concurrent
+// players of read-only content). "Users" are approximated by unique client IPs
+// seen in the recent window — no per-user state, no player identity. ---
+const THREADS = Math.max(1, os.cpus()?.length || 1);
+const USERS_PER_THREAD = Math.max(1, Number(env("OH_NODE_USERS_PER_THREAD", 20)));
+const MAX_USERS = THREADS * USERS_PER_THREAD;
+const USER_WINDOW_MS = 5 * 60 * 1000;
+const activeUsers = new Map(); // ip -> lastSeen (ms)
+const clientIp = (req) =>
+  req.headers["cf-connecting-ip"]
+  || String(req.headers["x-forwarded-for"] || "").split(",")[0].trim()
+  || req.socket.remoteAddress || "unknown";
+const touchUser = (req) => { activeUsers.set(clientIp(req), Date.now()); };
+const currentUsers = () => {
+  const cutoff = Date.now() - USER_WINDOW_MS;
+  let n = 0;
+  for (const [ip, seen] of activeUsers) { if (seen < cutoff) activeUsers.delete(ip); else n += 1; }
+  return n;
+};
+const statusBody = () => {
+  const users = currentUsers();
+  return {
+    id: identity.id, region: REGION, operator: OPERATOR, version: NODE_VERSION, status: control.status,
+    threads: THREADS, maxUsers: MAX_USERS, currentUsers: users, full: users >= MAX_USERS,
+  };
+};
 
 // --- Identity: a stable id + Ed25519 keypair, persisted on first run so the
 // registry can confirm this node controls its id (prevents id hijacking). ---
@@ -106,12 +135,29 @@ app.get("/oh/v1/manifest", (req, res) => {
   res.json({ id: identity.id, version: NODE_VERSION, caps: ["content"], status: control.status, hashes: listContentHashes() });
 });
 
+// Live status the client uses to pick the best node (latency + free capacity).
+// A pure read — does NOT count the caller as a user (so the home page pinging
+// every node to compare them doesn't inflate anyone's load).
+app.get("/oh/v1/status", (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json(statusBody());
+});
+
+// Heartbeat: the client calls this on connect and periodically while playing,
+// so this player counts toward the node's live user count until they leave.
+app.get("/oh/v1/ping", (req, res) => {
+  touchUser(req);
+  res.setHeader("Cache-Control", "no-store");
+  res.json(statusBody());
+});
+
 // Honest nodes stop serving content when the signed directory says they're
 // paused/banned. (Clients already won't route to them; this is a courtesy.)
 const serveable = () => control.status === "active" || control.status === "pending";
 
 app.get("/oh/v1/content/:hash", (req, res) => {
   if (!serveable()) return res.status(503).json({ error: `Node is ${control.status}.` });
+  touchUser(req); // fetching content counts you as an active player of this node
   const hash = String(req.params.hash || "").toLowerCase();
   if (!HASH_RE.test(hash)) return res.status(400).json({ error: "Invalid content hash." });
 
@@ -157,6 +203,8 @@ const register = async () => {
     operator: OPERATOR,
     region: REGION,
     version: NODE_VERSION,
+    threads: THREADS,
+    maxUsers: MAX_USERS,
     hashes: listContentHashes().length,
     ts: new Date().toISOString(),
   };
