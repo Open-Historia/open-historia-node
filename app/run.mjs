@@ -108,6 +108,9 @@ const run = (commandLine) => {
   const r = spawnSync(commandLine, { cwd: REPO_ROOT, stdio: "inherit", shell: true });
   return r.status === 0;
 };
+const gitAvailable = () => {
+  try { return spawnSync("git --version", { stdio: "ignore", shell: true }).status === 0; } catch { return false; }
+};
 
 // Pull the latest node code + reinstall deps, then record the applied version.
 // Git checkouts self-update; a plain-download install can't (git is required),
@@ -119,6 +122,15 @@ const applyUpdate = async () => {
     console.warn(`Update v${target} was requested, but this node isn't a git checkout — automatic updates need one.`);
     console.warn("Re-install with:  git clone https://github.com/Open-Historia/open-historia-node   (or re-download the latest release).");
     writeAppliedSw(target); // don't loop on an update we can't apply
+    return;
+  }
+  if (!gitAvailable()) {
+    // git not installed — skip the update and keep running the current version
+    // (marking it applied so the node doesn't restart-loop on an update it can't
+    // perform). Re-running the installer, or installing git, restores updates.
+    console.warn(`Update v${target} was requested, but git isn't installed — skipping. The node keeps running the current version.`);
+    console.warn("Install git (https://git-scm.com/downloads) or re-run the installer to enable automatic updates.");
+    writeAppliedSw(target);
     return;
   }
   console.log(`Applying node software update v${target}…`);

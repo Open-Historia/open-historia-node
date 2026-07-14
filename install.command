@@ -15,17 +15,29 @@ echo "  Help players load the game faster."
 echo "=============================================="
 
 # ---- 1. Node.js (no Homebrew - use the official .pkg) ----
-section "1/5  Checking Node.js"
-if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'process.versions.node.split(".")[0]')" -lt 18 ]; then
-  echo "Node.js 18+ is required and was not found."
-  echo "Opening the official download page - install the macOS Installer (.pkg),"
-  echo "then double-click this installer again. (No Homebrew needed.)"
+section "1/5  Checking prerequisites (Node.js, git)"
+node_ok() {
+  command -v node >/dev/null 2>&1 || return 1
+  local m; m=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null) || return 1
+  [ "$m" -ge 18 ] 2>/dev/null
+}
+if ! node_ok; then
+  echo "Node.js 18+ not found - installing it via nvm (no admin needed)..."
+  export NVM_DIR="$HOME/.nvm"
+  [ -s "$NVM_DIR/nvm.sh" ] || curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+  # shellcheck disable=SC1091
+  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+  nvm install --lts || true
+fi
+if ! node_ok; then
+  echo "Couldn't set up Node.js automatically."
+  echo "Opening the official download page - install the macOS Installer (.pkg), then double-click this installer again."
   open "https://nodejs.org/en/download/" || true
-  echo ""
   read -r -p "Press Enter to exit."
   exit 1
 fi
-echo "Node.js $(node --version) found."
+echo "Node.js $(node --version) ready."
+command -v git >/dev/null 2>&1 || echo "Note: git isn't installed - the node runs, but automatic updates need it (run: xcode-select --install)."
 
 # ---- 2. Dependencies ----
 section "2/5  Installing dependencies"
@@ -110,6 +122,7 @@ EOF
 cat > start.command <<'EOF'
 #!/usr/bin/env bash
 cd "$(dirname "$0")"
+export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
 exec node app/run.mjs
 EOF
 chmod +x start.command

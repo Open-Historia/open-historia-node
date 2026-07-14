@@ -14,12 +14,26 @@ echo "  Help players load the game faster."
 echo "=============================================="
 
 # ---- 1. Node.js ----
-section "1/5  Checking Node.js"
-if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'process.versions.node.split(".")[0]')" -lt 18 ]; then
-  echo "Node.js 18+ is required. Install it from https://nodejs.org/ (or your package manager) and re-run." >&2
+section "1/5  Checking prerequisites (Node.js, git)"
+node_ok() {
+  command -v node >/dev/null 2>&1 || return 1
+  local m; m=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null) || return 1
+  [ "$m" -ge 18 ] 2>/dev/null
+}
+if ! node_ok; then
+  echo "Node.js 18+ not found - installing it via nvm (no admin needed)..."
+  export NVM_DIR="$HOME/.nvm"
+  [ -s "$NVM_DIR/nvm.sh" ] || curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+  # shellcheck disable=SC1091
+  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+  nvm install --lts || true
+fi
+if ! node_ok; then
+  echo "Couldn't set up Node.js automatically. Install it from https://nodejs.org/ and re-run." >&2
   exit 1
 fi
-echo "Node.js $(node --version) found."
+echo "Node.js $(node --version) ready."
+command -v git >/dev/null 2>&1 || echo "Note: git isn't installed - the node runs, but automatic updates need it (install it via your package manager)."
 
 # ---- 2. Dependencies ----
 section "2/5  Installing dependencies"
@@ -102,6 +116,7 @@ EOF
 cat > start.sh <<'EOF'
 #!/usr/bin/env bash
 cd "$(dirname "$0")"
+export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
 exec node app/run.mjs
 EOF
 chmod +x start.sh

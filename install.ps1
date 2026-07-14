@@ -13,18 +13,38 @@ Write-Host "  Open Historia - content node setup" -ForegroundColor Cyan
 Write-Host "  Help players load the game faster." -ForegroundColor Cyan
 Write-Host "==============================================" -ForegroundColor Cyan
 
-# ---- 1. Node.js ----
-Section "1/5  Checking Node.js"
-try {
-  $nodeVersion = (node --version)
-  if ([int]($nodeVersion.TrimStart("v").Split(".")[0]) -lt 18) { throw "too old" }
-  Write-Host "Node.js $nodeVersion found." -ForegroundColor Green
-} catch {
-  Write-Host "Node.js 18+ is required and was not found." -ForegroundColor Red
-  Write-Host "Opening the download page - install the LTS, then run this installer again."
+# ---- 1. Prerequisites: Node.js (required) + git (for auto-updates) ----
+Section "1/5  Checking prerequisites (Node.js, git)"
+
+function Refresh-Path {
+  # Pull the machine + user PATH from the registry so a just-installed tool is
+  # usable in THIS session (installers update the registry, not the live shell).
+  $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
+              [System.Environment]::GetEnvironmentVariable("Path","User")
+}
+function Have-Cmd($name) { [bool](Get-Command $name -ErrorAction SilentlyContinue) }
+function Winget-Install($id, $label) {
+  if (-not (Have-Cmd "winget")) { return }
+  Write-Host "Installing $label automatically (via winget)..." -ForegroundColor Cyan
+  try { winget install --id $id -e --accept-source-agreements --accept-package-agreements } catch { }
+  Refresh-Path
+}
+function NodeOk { try { return [int]((node --version).TrimStart("v").Split(".")[0]) -ge 18 } catch { return $false } }
+
+# Node.js is required.
+if (-not (NodeOk)) { Winget-Install "OpenJS.NodeJS.LTS" "Node.js LTS" }
+if (-not (NodeOk)) {
+  Write-Host "Couldn't install Node.js automatically (winget may be unavailable)." -ForegroundColor Red
+  Write-Host "Opening the download page - install the LTS (keep the defaults), then re-run this installer."
   Start-Process "https://nodejs.org/en/download"
   Read-Host "Press Enter to exit"; exit 1
 }
+Write-Host "Node.js $(node --version) ready." -ForegroundColor Green
+
+# git is only needed for automatic updates - the node runs fine without it.
+if (-not (Have-Cmd "git")) { Winget-Install "Git.Git" "Git" }
+if (Have-Cmd "git") { Write-Host "git ready." -ForegroundColor Green }
+else { Write-Host "git is still missing - the node will run, but automatic updates need it. Install it later from https://git-scm.com/downloads." -ForegroundColor Yellow }
 
 # ---- 2. Dependencies ----
 Section "2/5  Installing dependencies"
