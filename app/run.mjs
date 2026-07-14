@@ -125,9 +125,12 @@ const fetchSwVersion = async () => {
   const dirUrl = cfg.directory;
   if (!dirUrl) return 0;
   try {
+    // Bounded: this now gates every startup (the offline-catch-up check), so a
+    // network that stalls mustn't hang the node — time out and treat as "unknown"
+    // (0), which serves current code and lets the periodic poll retry.
     const [docRes, sigRes] = await Promise.all([
-      fetch(dirUrl, { cache: "no-store" }),
-      fetch(`${dirUrl}.sig`, { cache: "no-store" }),
+      fetch(dirUrl, { cache: "no-store", signal: AbortSignal.timeout(10000) }),
+      fetch(`${dirUrl}.sig`, { cache: "no-store", signal: AbortSignal.timeout(10000) }),
     ]);
     if (!docRes.ok || !sigRes.ok) return 0;
     const bytes = Buffer.from(await docRes.arrayBuffer());
@@ -192,7 +195,9 @@ const applyTarballUpdate = async () => {
     mkdirSync(tmpDir, { recursive: true });
 
     console.log(`Downloading the latest node code from ${tgzUrl} …`);
-    const res = await fetch(tgzUrl, { redirect: "follow" });
+    // Bounded so a stalled download can't hang startup — 60s is ample for a small
+    // code tarball; on timeout we serve current code and retry next cycle.
+    const res = await fetch(tgzUrl, { redirect: "follow", signal: AbortSignal.timeout(60000) });
     if (!res.ok) { console.warn(`update download failed: HTTP ${res.status}`); return false; }
     writeFileSync(tgzPath, Buffer.from(await res.arrayBuffer()));
 
@@ -255,9 +260,18 @@ const applyUpdate = async () => {
 const url = await startTunnel();
 if (url) process.env.OH_NODE_PUBLIC_URL = url;
 
-// On a fresh install adopt the current version without updating (the download is
-// already current) — only future bumps trigger an update.
+// Startup version reconciliation (runs on every launch — start.bat, start.vbs,
+// or the installer starting the node — since they all run this file):
+//  - Fresh install: adopt the current signed version without updating (the
+//    download is already current).
+//  - Existing install: check ONCE for an update we may have missed while offline
+//    — e.g. the admin bumped the version and pinged while this node was powered
+//    off — and apply it before we start serving, instead of waiting for the first
+//    5-min poll. applyUpdate is a no-op when already current (just one signed-
+//    directory fetch) and never bricks: on failure it leaves the version
+//    unapplied and the periodic poll retries.
 if (!existsSync(SW_STATE)) writeAppliedSw(await fetchSwVersion());
+else await applyUpdate();
 
 // Open the local operator dashboard (the node's "interface") in the default
 // browser once the server has had a moment to bind. Best-effort; headless boxes
@@ -280,7 +294,15 @@ setTimeout(() => {
 // Supervise the content server: relaunch it whenever it exits asking for an
 // update (75), applying the update in between. A clean exit (0 — e.g. the
 // dashboard's graceful shutdown) or an operator Ctrl-C ends the process.
-let repairsLeft = 0; // >0 right after an update: re-sync deps if the new code can't boot
+//
+// Boot-crash self-heal: if server.js exits abnormally within seconds of launch,
+// that's almost always an unsynced dependency — an update (applied here on a 75
+// exit, OR at startup above from a missed ping) overlaid new code but npm install
+// didn't finish. Re-run npm install and retry, bounded, so a bad-deps state heals
+// itself instead of bricking the node. This is symptom-based (not tied to whether
+// an update just ran here) so it covers the startup-applied case too. A server
+// that runs a healthy stretch clears the budget.
+let bootFailures = 0;
 for (;;) {
   const startedAt = Date.now();
   const code = await new Promise((resolve) => {
@@ -288,18 +310,12 @@ for (;;) {
     child.on("exit", (c) => resolve(c ?? 0));
     child.on("error", (e) => { console.error(`node server failed to start: ${e.message}`); resolve(1); });
   });
-  if (code === UPDATE_EXIT) {
-    await applyUpdate();
-    repairsLeft = 3; // give the freshly-updated server a few boot-repair tries
-    console.log("Restarting node server…");
-    continue;
-  }
-  // A crash within seconds of an update is almost always an unsynced dependency
-  // (npm install failed after the code overlay). Re-run it and retry, bounded, so
-  // a transient npm blip during an update self-heals instead of bricking the node.
-  if (code !== 0 && repairsLeft > 0 && Date.now() - startedAt < 15000) {
-    repairsLeft -= 1;
-    console.warn(`Node exited (code ${code}) seconds after an update — re-syncing dependencies and retrying…`);
+  if (code === UPDATE_EXIT) { await applyUpdate(); bootFailures = 0; console.log("Restarting node server…"); continue; }
+  const ranMs = Date.now() - startedAt;
+  if (ranMs >= 15000) bootFailures = 0; // booted and ran fine — reset the repair budget
+  if (code !== 0 && ranMs < 15000 && bootFailures < 3) {
+    bootFailures += 1;
+    console.warn(`Node exited (code ${code}) ${Math.round(ranMs / 1000)}s after launch — re-syncing dependencies and retrying (${bootFailures}/3)…`);
     run("npm install --omit=dev", APP_DIR);
     continue;
   }
