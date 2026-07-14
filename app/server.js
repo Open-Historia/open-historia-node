@@ -394,6 +394,11 @@ const register = async () => {
 };
 
 // --- Directory guard: poll the ROOT-SIGNED directory and self-enforce state. ---
+// Don't act on an update signal during the startup poll: if an update is pending
+// but can't be applied yet (e.g. the node is briefly offline), exiting at startup
+// would tight-loop (exit → respawn → exit). Only the periodic poll and the admin
+// "refresh" ping restart to update, so there's always a serving window between tries.
+let allowUpdateRestart = false;
 const refreshControl = async () => {
   if (!DIRECTORY_URL) return;
   try {
@@ -412,7 +417,7 @@ const refreshControl = async () => {
     void base;
     // Software-update signal (admin bumped swVersion in the signed, verified
     // directory). Exit so the run.mjs supervisor pulls the new code + restarts.
-    if ((Number(data.swVersion) || 0) > appliedSwVersion()) {
+    if (allowUpdateRestart && (Number(data.swVersion) || 0) > appliedSwVersion()) {
       console.log(`Node software update v${Number(data.swVersion)} requested — restarting to apply…`);
       process.exit(UPDATE_EXIT_CODE);
     }
@@ -451,6 +456,9 @@ const server = app.listen(...listenArgs, async () => {
   } catch (error) {
     console.warn(`startup tasks failed (will retry): ${error.message}`);
   }
+  // Startup poll done — from here the periodic poll + admin ping may restart to
+  // apply an update (see allowUpdateRestart above).
+  allowUpdateRestart = true;
   // Keep the registration fresh every 15 min once we're on. Until then, retry
   // every 30s so a tunnel URL that arrives after startup registers promptly
   // instead of waiting a full 15-min cycle.

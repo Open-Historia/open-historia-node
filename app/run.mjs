@@ -4,7 +4,7 @@
 // URL directly from cloudflared's output (reliable on every OS — no shell log
 // parsing), then launches the node with that URL.
 import { spawn, spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, unlinkSync, rmSync, cpSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -40,6 +40,13 @@ for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { cleanup(); proc
 
 const startTunnel = () => new Promise((resolve) => {
   const mode = cfg.tunnel || "none";
+  // Any leftover public-url.txt is from a PREVIOUS run and may be stale: a quick
+  // tunnel gets a new hostname each launch, and a switch to none/named (or a
+  // missing cloudflared binary) means there's no quick URL this run at all. Clear
+  // it up front — before every early return below — so server.js never registers
+  // a dead URL; a live quick tunnel rewrites it via capture() once detected. The
+  // named/config-publicUrl cases carry their URL via env, not this file.
+  try { unlinkSync(PUBLIC_URL_FILE); } catch { /* no stale file — fine */ }
   if (mode === "none" || !existsSync(cfBin)) return resolve(null);
 
   if (mode === "named" && cfg.tunnelName) {
@@ -49,9 +56,6 @@ const startTunnel = () => new Promise((resolve) => {
   }
 
   console.log("Starting Cloudflare Tunnel (quick)...");
-  // A quick tunnel gets a NEW hostname every launch, so a leftover URL from a
-  // previous run would be stale — clear it before we (re)detect this run's URL.
-  try { unlinkSync(PUBLIC_URL_FILE); } catch { /* no stale file — fine */ }
   tunnel = spawn(cfBin, ["tunnel", "--url", `http://localhost:${PORT}`], { stdio: ["ignore", "pipe", "pipe"] });
   let done = false;
   let acc = "";
@@ -137,45 +141,115 @@ const fetchSwVersion = async () => {
 // STRING (not an args array) to avoid Node's DEP0190 warning and to resolve
 // git/npm on Windows via PATHEXT. Every command line here is constant — no
 // untrusted input is interpolated — so shell concatenation is safe.
-const run = (commandLine) => {
-  const r = spawnSync(commandLine, { cwd: REPO_ROOT, stdio: "inherit", shell: true });
+const run = (commandLine, cwd = REPO_ROOT) => {
+  const r = spawnSync(commandLine, { cwd, stdio: "inherit", shell: true });
   return r.status === 0;
 };
+const APP_DIR = __dirname; // package.json + node_modules live in app/, not the root
 const gitAvailable = () => {
   try { return spawnSync("git --version", { stdio: "ignore", shell: true }).status === 0; } catch { return false; }
 };
 
+// Where the node's code comes from when we self-update. The registry only ever
+// tells us "version N exists" (a root-SIGNED signal — see fetchSwVersion); the
+// code itself always comes from this hardcoded official repo over TLS, exactly
+// like a git checkout's `git fetch origin`. A compromised registry can trigger a
+// restart but can never point the node at attacker-controlled code.
+const REPO_SLUG = process.env.OH_NODE_REPO_SLUG || "Open-Historia/open-historia-node";
+// Branch is interpolated into the codeload URL and into git commands run with
+// shell:true, so constrain it to safe branch-name characters and fall back to
+// main on anything unexpected. It's operator-set, so this is hygiene, not a
+// privilege boundary (an operator can already run any command).
+const rawBranch = process.env.OH_NODE_UPDATE_BRANCH || "main";
+const UPDATE_BRANCH = /^[A-Za-z0-9._/-]+$/.test(rawBranch) ? rawBranch : "main";
+
+// A real git checkout self-updates cleanly and prunes files deleted upstream.
+const applyGitUpdate = () =>
+  // origin/<branch> explicitly (branch-config agnostic — a checkout tracking a
+  // different local branch would otherwise break). Fast-forward if possible, else
+  // hard-reset (a node has no local changes to keep). Same branch as the tarball
+  // path, so both update paths stay consistent.
+  run(`git fetch origin ${UPDATE_BRANCH}`) &&
+  (run(`git merge --ff-only origin/${UPDATE_BRANCH}`) || run(`git reset --hard origin/${UPDATE_BRANCH}`));
+
+// Most nodes are plain ZIP downloads with no .git, so they can't `git pull`.
+// Download the official repo tarball and overlay it. The archive holds ONLY
+// tracked files (code, installers, package manifests) — never content/, data/,
+// node.config.json, .node-version.json, cloudflared, or node_modules (all
+// gitignored) — so copying it over the install can't touch runtime state.
+const applyTarballUpdate = async () => {
+  const tgzUrl = `https://codeload.github.com/${REPO_SLUG}/tar.gz/refs/heads/${UPDATE_BRANCH}`;
+  // Keep these as direct children of REPO_ROOT: the tar call below uses their
+  // bare names with cwd=REPO_ROOT so no absolute path (with a Windows "C:" drive
+  // letter) is passed to tar — GNU tar would read "C:" as a remote host and fail.
+  const TMP_NAME = ".oh-update-tmp";
+  const TGZ_NAME = ".oh-update.tgz";
+  const tmpDir = path.join(REPO_ROOT, TMP_NAME);
+  const tgzPath = path.join(REPO_ROOT, TGZ_NAME);
+  try {
+    rmSync(tmpDir, { recursive: true, force: true });
+    rmSync(tgzPath, { force: true });
+    mkdirSync(tmpDir, { recursive: true });
+
+    console.log(`Downloading the latest node code from ${tgzUrl} …`);
+    const res = await fetch(tgzUrl, { redirect: "follow" });
+    if (!res.ok) { console.warn(`update download failed: HTTP ${res.status}`); return false; }
+    writeFileSync(tgzPath, Buffer.from(await res.arrayBuffer()));
+
+    // tar ships with Windows 10 1803+ (bsdtar), macOS (bsdtar), and Linux (GNU
+    // tar); all handle a gzipped tarball with -xzf. Run from REPO_ROOT with bare
+    // relative names (see TMP_NAME/TGZ_NAME above) so no drive-letter colon leaks.
+    if (!run(`tar -xzf ${TGZ_NAME} -C ${TMP_NAME}`, REPO_ROOT)) {
+      console.warn("update extract failed — 'tar' seems unavailable (Windows 10 1803+, macOS, and Linux all include it).");
+      return false;
+    }
+    // codeload extracts to one top-level folder, e.g. open-historia-node-main/.
+    const srcRoot = readdirSync(tmpDir)
+      .map((n) => path.join(tmpDir, n))
+      .find((p) => { try { return statSync(p).isDirectory(); } catch { return false; } });
+    if (!srcRoot) { console.warn("update archive was empty."); return false; }
+
+    // Overlay onto the install (force-overwrite code; leave runtime state alone —
+    // it isn't in the archive). NB overlay doesn't delete files removed upstream;
+    // acceptable — a stale unused file is harmless. Overwriting run.mjs while it
+    // runs is fine (Node loads the script into memory and holds no lock on it);
+    // the new launcher takes effect on the next full node restart.
+    cpSync(srcRoot, REPO_ROOT, { recursive: true, force: true });
+    return true;
+  } catch (e) {
+    console.warn(`update failed: ${e.message}`);
+    return false;
+  } finally {
+    try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+    try { rmSync(tgzPath, { force: true }); } catch { /* best-effort */ }
+  }
+};
+
 // Pull the latest node code + reinstall deps, then record the applied version.
-// Git checkouts self-update; a plain-download install can't (git is required),
-// so we mark it applied to avoid a restart loop and tell the operator to update.
 const applyUpdate = async () => {
   const target = await fetchSwVersion();
   if (target <= readAppliedSw()) return; // nothing newer (or unverifiable)
-  if (!existsSync(path.join(REPO_ROOT, ".git"))) {
-    console.warn(`Update v${target} was requested, but this node isn't a git checkout — automatic updates need one.`);
-    console.warn("Re-install with:  git clone https://github.com/Open-Historia/open-historia-node   (or re-download the latest release).");
-    writeAppliedSw(target); // don't loop on an update we can't apply
-    return;
-  }
-  if (!gitAvailable()) {
-    // git not installed — skip the update and keep running the current version
-    // (marking it applied so the node doesn't restart-loop on an update it can't
-    // perform). Re-running the installer, or installing git, restores updates.
-    console.warn(`Update v${target} was requested, but git isn't installed — skipping. The node keeps running the current version.`);
-    console.warn("Install git (https://git-scm.com/downloads) or re-run the installer to enable automatic updates.");
-    writeAppliedSw(target);
-    return;
-  }
   console.log(`Applying node software update v${target}…`);
-  // Update to origin/main explicitly (branch-config agnostic — a checkout whose
-  // local branch tracks 'master' would otherwise break `git pull`). Fast-forward
-  // if possible, else hard-reset (a node has no local changes to keep).
-  const updated = run("git fetch origin main") &&
-    (run("git merge --ff-only origin/main") || run("git reset --hard origin/main"));
-  if (!updated) { console.warn("git update failed — staying on the current version, will retry next cycle."); return; }
-  run("npm install --omit=dev");
+  const gitCheckout = existsSync(path.join(REPO_ROOT, ".git")) && gitAvailable();
+  const ok = gitCheckout ? applyGitUpdate() : await applyTarballUpdate();
+  if (!ok) {
+    // Leave the applied version behind so we retry next cycle. server.js only
+    // re-triggers from its periodic/ping poll (not at startup), so a persistent
+    // failure means a slow retry with the node still serving — not a tight loop.
+    console.warn("Update didn't complete — staying on the current version; will retry later. The node keeps serving.");
+    return;
+  }
+  // Sync deps to the new lockfile (in app/). If this fails we must NOT record the
+  // version as applied: the new code is already on disk and may import a dep that
+  // isn't installed yet, so leaving applied < target lets the next poll re-run
+  // this (idempotent) update, and the supervise loop re-syncs deps if the fresh
+  // server can't even boot. Recording it here would brick the node with no retry.
+  if (!run("npm install --omit=dev", APP_DIR)) {
+    console.warn("Dependency install failed — not recording the update as applied; will re-sync and retry. The node keeps serving if it can boot.");
+    return;
+  }
   writeAppliedSw(target);
-  console.log(`Node software updated to v${target}.`);
+  console.log(`Node software updated to v${target}. The new server starts now; a full restart also applies the launcher.`);
 };
 
 const url = await startTunnel();
@@ -193,19 +267,41 @@ setTimeout(() => {
   try {
     const [cmd, cmdArgs] = process.platform === "win32" ? ["cmd", ["/c", "start", "", dashUrl]]
       : process.platform === "darwin" ? ["open", [dashUrl]] : ["xdg-open", [dashUrl]];
-    spawn(cmd, cmdArgs, { detached: true, stdio: "ignore" }).unref();
+    const opener = spawn(cmd, cmdArgs, { detached: true, stdio: "ignore" });
+    // A missing opener (e.g. no xdg-open on a headless Linux box) reports ENOENT
+    // ASYNCHRONOUSLY via an 'error' event — the try/catch above can't catch that,
+    // and an unhandled child 'error' would crash this supervisor and take the
+    // tunnel (and the whole node) down. Swallow it: opening a browser is optional.
+    opener.on("error", () => { /* no browser to open — fine */ });
+    opener.unref();
   } catch { /* opening the dashboard is optional */ }
 }, 2500);
 
 // Supervise the content server: relaunch it whenever it exits asking for an
-// update (75), applying the update in between. Any other exit ends the process.
+// update (75), applying the update in between. A clean exit (0 — e.g. the
+// dashboard's graceful shutdown) or an operator Ctrl-C ends the process.
+let repairsLeft = 0; // >0 right after an update: re-sync deps if the new code can't boot
 for (;;) {
+  const startedAt = Date.now();
   const code = await new Promise((resolve) => {
     const child = spawn(process.execPath, [path.join(__dirname, "server.js")], { stdio: "inherit", env: process.env });
     child.on("exit", (c) => resolve(c ?? 0));
     child.on("error", (e) => { console.error(`node server failed to start: ${e.message}`); resolve(1); });
   });
-  if (code !== UPDATE_EXIT) process.exit(code);
-  await applyUpdate();
-  console.log("Restarting node server…");
+  if (code === UPDATE_EXIT) {
+    await applyUpdate();
+    repairsLeft = 3; // give the freshly-updated server a few boot-repair tries
+    console.log("Restarting node server…");
+    continue;
+  }
+  // A crash within seconds of an update is almost always an unsynced dependency
+  // (npm install failed after the code overlay). Re-run it and retry, bounded, so
+  // a transient npm blip during an update self-heals instead of bricking the node.
+  if (code !== 0 && repairsLeft > 0 && Date.now() - startedAt < 15000) {
+    repairsLeft -= 1;
+    console.warn(`Node exited (code ${code}) seconds after an update — re-syncing dependencies and retrying…`);
+    run("npm install --omit=dev", APP_DIR);
+    continue;
+  }
+  process.exit(code);
 }
