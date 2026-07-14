@@ -24,7 +24,15 @@ const PORT = Number(env("OH_NODE_PORT", 4400));
 const HOST = env("OH_NODE_HOST", undefined);
 const CONTENT_DIR = path.resolve(env("OH_NODE_CONTENT_DIR", path.join(__dirname, "content")));
 const DATA_DIR = path.resolve(env("OH_NODE_DATA_DIR", path.join(__dirname, "data")));
-const PUBLIC_URL = env("OH_NODE_PUBLIC_URL", "");
+// The tunnel URL comes from the env when run.mjs captured it before starting us,
+// or from data/public-url.txt when the tunnel came up late (run.mjs writes it
+// there). Read it live so a late URL is picked up on the next registration try.
+const PUBLIC_URL_FILE = path.join(DATA_DIR, "public-url.txt");
+const publicUrl = () => {
+  const fromEnv = env("OH_NODE_PUBLIC_URL", "");
+  if (fromEnv) return fromEnv;
+  try { return fs.readFileSync(PUBLIC_URL_FILE, "utf8").trim(); } catch { return ""; }
+};
 const REGISTRY_URL = env("OH_NODE_REGISTRY_URL", "");
 const DIRECTORY_URL = env("OH_NODE_DIRECTORY_URL", "");
 const OPERATOR = env("OH_NODE_OPERATOR", "");
@@ -353,11 +361,13 @@ app.use((req, res) => res.status(404).json({ error: "Not found." }));
 
 // --- Self-registration: announce this node to the project registry as pending.
 // The registration is signed with the node's key so its id can't be hijacked. ---
+let registered = false;
 const register = async () => {
-  if (!REGISTRY_URL || !PUBLIC_URL) return;
+  const url = publicUrl();
+  if (!REGISTRY_URL || !url) return;
   const payload = {
     id: identity.id,
-    url: PUBLIC_URL,
+    url,
     publicKey: identity.publicKey,
     caps: ["content", "mirror"],
     operator: OPERATOR,
@@ -376,7 +386,7 @@ const register = async () => {
       headers: { "Content-Type": "application/json", "X-Node-Signature": signature },
       body,
     });
-    if (res.ok) console.log(`Registered with the registry as ${(await res.json().catch(() => ({}))).status || "pending"}.`);
+    if (res.ok) { registered = true; console.log(`Registered with the registry as ${(await res.json().catch(() => ({}))).status || "pending"}.`); }
     else console.warn(`registry: HTTP ${res.status}`);
   } catch (error) {
     console.warn(`registry unreachable: ${error.message}`);
@@ -425,11 +435,14 @@ const listenArgs = HOST ? [PORT, HOST] : [PORT];
 const server = app.listen(...listenArgs, async () => {
   console.log(`Open Historia content node "${identity.id}" on http://${HOST || "0.0.0.0"}:${PORT}`);
   console.log(`Serving ${listContentHashes().length} object(s) from ${CONTENT_DIR}`);
-  if (PUBLIC_URL) console.log(`Public URL: ${PUBLIC_URL}`);
+  const startUrl = publicUrl();
+  if (startUrl) console.log(`Public URL: ${startUrl}`);
   console.log(
-    REGISTRY_URL && PUBLIC_URL
+    REGISTRY_URL && startUrl
       ? `Registry: ${REGISTRY_URL} — registering (nodes are accepted automatically; an admin can ban via the panel).`
-      : "Not registering: OH_NODE_REGISTRY_URL and OH_NODE_PUBLIC_URL must both be set (the installer's Cloudflare Tunnel does this). No player traffic reaches an unregistered node.",
+      : REGISTRY_URL
+        ? "Waiting for the Cloudflare Tunnel URL before registering — this happens automatically once the tunnel is up (usually a few seconds; up to a minute on a slow connection). No action needed."
+        : "Not registering: no registry configured. Re-run the installer (install.bat / install.command) so it writes node.config.json with the registry + tunnel.",
   );
   // Startup tasks must never crash the node (Node aborts on an unhandled rejection).
   try {
@@ -438,10 +451,15 @@ const server = app.listen(...listenArgs, async () => {
   } catch (error) {
     console.warn(`startup tasks failed (will retry): ${error.message}`);
   }
+  // Keep the registration fresh every 15 min once we're on. Until then, retry
+  // every 30s so a tunnel URL that arrives after startup registers promptly
+  // instead of waiting a full 15-min cycle.
   const registerTimer = setInterval(register, 15 * 60 * 1000);
+  const fastRegisterTimer = setInterval(() => { if (!registered) register(); }, 30 * 1000);
   const controlTimer = setInterval(refreshControl, 5 * 60 * 1000);
-  if (typeof registerTimer.unref === "function") registerTimer.unref();
-  if (typeof controlTimer.unref === "function") controlTimer.unref();
+  for (const t of [registerTimer, fastRegisterTimer, controlTimer]) {
+    if (typeof t.unref === "function") t.unref();
+  }
 });
 server.on("error", (error) => {
   if (error.code === "EADDRINUSE") {
@@ -472,7 +490,7 @@ const dash = express();
 dash.disable("x-powered-by");
 dash.get("/stats", (req, res) => {
   res.setHeader("Cache-Control", "no-store");
-  res.json({ ...statsPayload(), publicUrl: PUBLIC_URL, dashboardPort: DASHBOARD_PORT });
+  res.json({ ...statsPayload(), publicUrl: publicUrl(), dashboardPort: DASHBOARD_PORT });
 });
 dash.post("/shutdown", (req, res) => { res.json({ ok: true, draining: true }); gracefulShutdown(); });
 dash.get("/", (req, res) => {

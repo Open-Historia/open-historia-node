@@ -4,7 +4,7 @@
 // URL directly from cloudflared's output (reliable on every OS — no shell log
 // parsing), then launches the node with that URL.
 import { spawn, spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -27,6 +27,11 @@ if (cfg.publicUrl) process.env.OH_NODE_PUBLIC_URL = cfg.publicUrl;
 
 const PORT = process.env.OH_NODE_PORT;
 const cfBin = path.join(__dirname, process.platform === "win32" ? "cloudflared.exe" : "cloudflared");
+// Where we hand the captured tunnel URL to server.js. Must match server.js's
+// DATA_DIR (env override or app/data) so a URL detected AFTER the server already
+// started (slow tunnels) is still picked up on its next registration attempt.
+const DATA_DIR = process.env.OH_NODE_DATA_DIR || path.join(__dirname, "data");
+const PUBLIC_URL_FILE = path.join(DATA_DIR, "public-url.txt");
 
 let tunnel = null;
 const cleanup = () => { if (tunnel) { try { tunnel.kill(); } catch { /* ignore */ } } };
@@ -44,17 +49,45 @@ const startTunnel = () => new Promise((resolve) => {
   }
 
   console.log("Starting Cloudflare Tunnel (quick)...");
+  // A quick tunnel gets a NEW hostname every launch, so a leftover URL from a
+  // previous run would be stale — clear it before we (re)detect this run's URL.
+  try { unlinkSync(PUBLIC_URL_FILE); } catch { /* no stale file — fine */ }
   tunnel = spawn(cfBin, ["tunnel", "--url", `http://localhost:${PORT}`], { stdio: ["ignore", "pipe", "pipe"] });
   let done = false;
-  const finish = (url) => { if (!done) { done = true; resolve(url); } };
+  let acc = "";
+  const finish = (u) => { if (!done) { done = true; resolve(u); } };
+  const capture = (u) => {
+    // Hand the URL to server.js two ways: the env (used when we detect it before
+    // spawning the server) and a file (used when the tunnel comes up LATE, after
+    // the server already started — server.js re-reads this on every register try).
+    process.env.OH_NODE_PUBLIC_URL = u;
+    try { mkdirSync(DATA_DIR, { recursive: true }); writeFileSync(PUBLIC_URL_FILE, u); } catch { /* best-effort */ }
+  };
   const scan = (buf) => {
-    const m = String(buf).match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
-    if (m) { console.log(`Your node is reachable at ${m[0]}`); finish(m[0]); }
+    // Accumulate: cloudflared prints the URL inside an ASCII box and can split
+    // one line across two stdout writes, so matching each chunk alone would miss
+    // it. Keep scanning even after we resolve, to catch a late/renewed URL.
+    acc += String(buf);
+    const m = acc.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+    if (m) {
+      console.log(done ? `Tunnel is up — registering now at ${m[0]}` : `Your node is reachable at ${m[0]}`);
+      capture(m[0]);
+      finish(m[0]);
+      acc = "";
+    } else if (acc.length > 65536) {
+      acc = acc.slice(-4096); // bound memory, keep enough tail to catch a split URL
+    }
   };
   tunnel.stdout.on("data", scan);
   tunnel.stderr.on("data", scan);
   tunnel.on("error", (e) => { console.warn(`cloudflared failed to start: ${e.message}`); finish(null); });
-  setTimeout(() => { if (!done) console.warn("Could not detect the tunnel URL yet (check the cloudflared window)."); finish(null); }, 60000);
+  // Don't block startup forever. After 120s, start serving locally anyway; the
+  // scan above stays attached, so once the tunnel is up the URL is captured and
+  // the node registers on its next cycle (~30s) with no restart needed.
+  setTimeout(() => {
+    if (!done) console.warn("Tunnel URL not detected yet — starting the node anyway. It will register automatically once the tunnel is up (this can take a minute on a slow connection).");
+    finish(null);
+  }, 120000);
 });
 
 // Self-heal an empty content folder (the installer's populate was skipped or
