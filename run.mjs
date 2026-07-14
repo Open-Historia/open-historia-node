@@ -4,7 +4,7 @@
 // URL directly from cloudflared's output (reliable on every OS — no shell log
 // parsing), then launches the node with that URL.
 import { spawn } from "node:child_process";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -52,6 +52,20 @@ const startTunnel = () => new Promise((resolve) => {
   tunnel.on("error", (e) => { console.warn(`cloudflared failed to start: ${e.message}`); finish(null); });
   setTimeout(() => { if (!done) console.warn("Could not detect the tunnel URL yet (check the cloudflared window)."); finish(null); }, 60000);
 });
+
+// Self-heal an empty content folder (the installer's populate was skipped or
+// failed): download the map assets before serving, so a node never registers
+// with nothing to serve.
+const contentDir = process.env.OH_NODE_CONTENT_DIR || path.join(__dirname, "content");
+const hasContent = existsSync(contentDir) && readdirSync(contentDir).some((n) => /^[a-f0-9]{64}$/.test(n));
+if (!hasContent) {
+  console.log("Content folder is empty — downloading map data (one time, ~180 MB)…");
+  await new Promise((resolve) => {
+    const p = spawn(process.execPath, [path.join(__dirname, "scripts", "populate.mjs")], { stdio: "inherit" });
+    p.on("exit", resolve);
+    p.on("error", (error) => { console.warn(`populate failed (will serve what it can): ${error.message}`); resolve(); });
+  });
+}
 
 const url = await startTunnel();
 if (url) process.env.OH_NODE_PUBLIC_URL = url;
