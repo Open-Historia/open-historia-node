@@ -146,4 +146,9 @@ Write-Host "  2. It registers with the project and is accepted automatically."
 Write-Host "  3. Manage it from the dashboard: live stats + a graceful shutdown button."
 Write-Host "==================================================="
 $startNow = Read-Host "Start the node now? (y/N)"
-if ($startNow -match "^[Yy]") { Start-Process "wscript.exe" -ArgumentList (Join-Path $PSScriptRoot "start.vbs") }
+if ($startNow -match "^[Yy]") {
+  # Quote the path — a home folder with a space (e.g. C:\Users\Nicholas Krol) would
+  # otherwise be split and wscript would try to run "C:\Users\Nicholas".
+  $vbs = Join-Path $PSScriptRoot "start.vbs"
+  Start-Process "wscript.exe" -ArgumentList "`"$vbs`""
+}
