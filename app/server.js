@@ -55,11 +55,13 @@ const currentUsers = () => {
 };
 const statusBody = () => {
   const users = currentUsers();
+  if (users > stats.peakUsers) stats.peakUsers = users;
   // No operator name here — this endpoint is public. The operator is sent only in
-  // registration (to the private admin record), never broadcast to players.
+  // registration (to the private admin record), never broadcast to players. While
+  // draining we report "draining"/full so clients move to another node.
   return {
-    id: identity.id, region: REGION, version: NODE_VERSION, status: control.status,
-    threads: THREADS, maxUsers: MAX_USERS, currentUsers: users, full: users >= MAX_USERS,
+    id: identity.id, region: REGION, version: NODE_VERSION, status: draining ? "draining" : control.status,
+    threads: THREADS, maxUsers: MAX_USERS, currentUsers: users, full: draining || users >= MAX_USERS,
   };
 };
 
@@ -87,6 +89,11 @@ const identity = loadIdentity();
 // automatically, so we default to active; the signed directory only ever
 // downgrades us to paused/banned.
 const control = { status: "active", rateLimit: DEFAULT_RATE_LIMIT, redirect: null };
+
+// Operator-dashboard metrics + graceful-drain flag. While draining, the node
+// stops serving content (so players fail over to other nodes) and then exits.
+const stats = { startedAt: Date.now(), requests: 0, bytes: 0, peakUsers: 0 };
+let draining = false;
 
 // Applied node-software version (written by run.mjs after an update). When the
 // signed directory's swVersion climbs past this, we exit 75 so run.mjs pulls the
@@ -218,7 +225,7 @@ app.get("/oh/v1/ping", (req, res) => {
 
 // Honest nodes stop serving content when the signed directory says they're
 // paused/banned. (Clients already won't route to them; this is a courtesy.)
-const serveable = () => control.status === "active" || control.status === "pending";
+const serveable = () => !draining && (control.status === "active" || control.status === "pending");
 
 app.get("/oh/v1/content/:hash", async (req, res) => {
   if (!serveable()) return res.status(503).json({ error: `Node is ${control.status}.` });
@@ -248,6 +255,7 @@ app.get("/oh/v1/content/:hash", async (req, res) => {
   }
 
   const { size } = fs.statSync(filePath);
+  stats.requests += 1;
   res.setHeader("Accept-Ranges", "bytes");
   res.setHeader("Content-Type", "application/octet-stream");
   res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
@@ -256,6 +264,7 @@ app.get("/oh/v1/content/:hash", async (req, res) => {
   if (!rangeHeader) {
     res.setHeader("Content-Length", String(size));
     if (req.method === "HEAD") return res.status(200).end();
+    stats.bytes += size;
     return fs.createReadStream(filePath).pipe(res);
   }
   const range = parseByteRange(rangeHeader, size);
@@ -267,6 +276,7 @@ app.get("/oh/v1/content/:hash", async (req, res) => {
   res.setHeader("Content-Length", String(range.end - range.start + 1));
   res.setHeader("Content-Range", `bytes ${range.start}-${range.end}/${size}`);
   if (req.method === "HEAD") return res.end();
+  stats.bytes += range.end - range.start + 1;
   return fs.createReadStream(filePath, { start: range.start, end: range.end }).pipe(res);
 });
 
@@ -403,3 +413,40 @@ server.on("error", (error) => {
   }
   process.exit(1);
 });
+
+// --- Local operator dashboard (127.0.0.1 ONLY — the Cloudflare tunnel forwards
+// only the content port, so the stats + shutdown control are local-machine-only).
+// Shows live stats and offers a graceful shutdown that first drains players to
+// other nodes (their games are saved to their account, not the node), then exits.
+const DASHBOARD_PORT = Number(env("OH_NODE_DASHBOARD_PORT", PORT + 1));
+const DRAIN_MS = Number(env("OH_NODE_DRAIN_MS", 12000));
+let dashboardHtml = "";
+try { dashboardHtml = fs.readFileSync(path.join(__dirname, "dashboard.html"), "utf8"); } catch { /* fall back to a plain message */ }
+
+const gracefulShutdown = () => {
+  if (draining) return;
+  draining = true; // content now 503s → players fail over to another node
+  console.log(`Graceful shutdown: draining for ${Math.round(DRAIN_MS / 1000)}s so players move to other nodes…`);
+  setTimeout(() => { console.log("Node shut down."); process.exit(0); }, DRAIN_MS);
+};
+
+const dash = express();
+dash.disable("x-powered-by");
+dash.get("/stats", (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  const users = currentUsers();
+  if (users > stats.peakUsers) stats.peakUsers = users;
+  res.json({
+    id: identity.id, region: REGION, version: NODE_VERSION, status: control.status, draining,
+    currentUsers: users, maxUsers: MAX_USERS, peakUsers: stats.peakUsers, threads: THREADS,
+    requests: stats.requests, bytes: stats.bytes, contentObjects: listContentHashes().length,
+    uptimeMs: Date.now() - stats.startedAt, publicUrl: PUBLIC_URL, dashboardPort: DASHBOARD_PORT,
+  });
+});
+dash.post("/shutdown", (req, res) => { res.json({ ok: true, draining: true }); gracefulShutdown(); });
+dash.get("/", (req, res) => {
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(dashboardHtml || "Open Historia node is running.");
+});
+const dashServer = dash.listen(DASHBOARD_PORT, "127.0.0.1", () => console.log(`Operator dashboard: http://localhost:${DASHBOARD_PORT}`));
+dashServer.on("error", (e) => console.warn(`Dashboard didn't start (${e.code || e.message}); the node is still serving content.`));

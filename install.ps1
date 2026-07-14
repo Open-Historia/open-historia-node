@@ -129,13 +129,21 @@ node app\run.mjs
 pause
 "@
 Set-Content -Path (Join-Path $PSScriptRoot "start.bat") -Value $startBat -Encoding ASCII
+# Hidden launcher: runs the node with NO console window. The operator dashboard
+# opens automatically in the browser and is the interface instead of a terminal.
+$startVbs = @"
+Set sh = CreateObject("WScript.Shell")
+sh.CurrentDirectory = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName)
+sh.Run "node app\run.mjs", 0, False
+"@
+Set-Content -Path (Join-Path $PSScriptRoot "start.vbs") -Value $startVbs -Encoding ASCII
 
 Write-Host ""
 Write-Host "================= Setup complete! =================" -ForegroundColor Green
-Write-Host "  1. Start your node any time: double-click start.bat"
-Write-Host "  2. It registers with the project as 'pending'."
-Write-Host "  3. Ask an admin to accept it - then players start using it automatically."
-Write-Host "     (No player traffic reaches an unapproved node.)"
+Write-Host "  1. Start your node any time: double-click start.vbs (no console window -"
+Write-Host "     the dashboard opens in your browser). Use start.bat to watch the logs."
+Write-Host "  2. It registers with the project and is accepted automatically."
+Write-Host "  3. Manage it from the dashboard: live stats + a graceful shutdown button."
 Write-Host "==================================================="
 $startNow = Read-Host "Start the node now? (y/N)"
-if ($startNow -match "^[Yy]") { & (Join-Path $PSScriptRoot "start.bat") }
+if ($startNow -match "^[Yy]") { Start-Process "wscript.exe" -ArgumentList (Join-Path $PSScriptRoot "start.vbs") }

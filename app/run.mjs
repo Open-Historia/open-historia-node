@@ -133,6 +133,18 @@ if (url) process.env.OH_NODE_PUBLIC_URL = url;
 // already current) — only future bumps trigger an update.
 if (!existsSync(SW_STATE)) writeAppliedSw(await fetchSwVersion());
 
+// Open the local operator dashboard (the node's "interface") in the default
+// browser once the server has had a moment to bind. Best-effort; headless boxes
+// simply won't have a browser to open.
+const dashUrl = `http://localhost:${Number(PORT) + 1}`;
+setTimeout(() => {
+  try {
+    const [cmd, cmdArgs] = process.platform === "win32" ? ["cmd", ["/c", "start", "", dashUrl]]
+      : process.platform === "darwin" ? ["open", [dashUrl]] : ["xdg-open", [dashUrl]];
+    spawn(cmd, cmdArgs, { detached: true, stdio: "ignore" }).unref();
+  } catch { /* opening the dashboard is optional */ }
+}, 2500);
+
 // Supervise the content server: relaunch it whenever it exits asking for an
 // update (75), applying the update in between. Any other exit ends the process.
 for (;;) {

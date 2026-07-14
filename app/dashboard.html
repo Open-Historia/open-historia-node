@@ -1,0 +1,126 @@
+<!doctype html>
+<!-- Open Historia node — local operator dashboard. Served ONLY on 127.0.0.1 by
+     the node itself (never exposed through the Cloudflare tunnel), so the stats
+     and the shutdown control are local-machine-only. -->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Open Historia Node</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.5 system-ui, sans-serif; color: #e6e8ee;
+    background: radial-gradient(1100px 500px at 50% -10%, rgba(124,58,237,.22), transparent), #0b0e16; }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 28px 20px 60px; }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
+  .dot { width: 11px; height: 11px; border-radius: 50%; background: #3ddc84; box-shadow: 0 0 12px #3ddc84; }
+  .dot.draining { background: #f0b429; box-shadow: 0 0 12px #f0b429; animation: pulse 1s infinite; }
+  .dot.off { background: #ef4444; box-shadow: 0 0 12px #ef4444; }
+  @keyframes pulse { 0%,100% { opacity: .4 } 50% { opacity: 1 } }
+  h1 { font-size: 20px; font-weight: 800; margin: 0; letter-spacing: -.01em; }
+  .sub { color: #9aa2b1; font-size: 13px; margin: 0 0 22px; }
+  .sub b { color: #c7ccd6; font-weight: 600; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 22px; }
+  .card { background: rgba(23,26,34,.8); border: 1px solid #262b36; border-radius: 14px; padding: 16px 16px 14px; }
+  .card .k { color: #9aa2b1; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 6px; }
+  .card .v { font-size: 26px; font-weight: 700; line-height: 1.1; }
+  .card .v small { font-size: 14px; color: #9aa2b1; font-weight: 500; }
+  .bar { height: 7px; background: #0f1117; border-radius: 99px; overflow: hidden; margin-top: 10px; border: 1px solid #262b36; }
+  .bar > i { display: block; height: 100%; background: linear-gradient(90deg, #7c3aed, #3ddc84); width: 0; transition: width .4s; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px 18px; background: rgba(23,26,34,.6); border: 1px solid #262b36; border-radius: 12px; padding: 12px 16px; font-size: 13px; margin-bottom: 22px; }
+  .row div { color: #9aa2b1; } .row b { color: #e6e8ee; font-weight: 600; }
+  .row a { color: #9ab0ff; word-break: break-all; }
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+  button { font: inherit; cursor: pointer; border-radius: 10px; padding: 11px 16px; border: 1px solid #262b36; background: #1d212b; color: #e6e8ee; }
+  button.danger { background: #7f1d1d; border-color: #b91c1c; color: #fff; font-weight: 600; }
+  button.danger:hover { background: #991b1b; } button:disabled { opacity: .5; cursor: default; }
+  .note { color: #9aa2b1; font-size: 12.5px; margin: 10px 0 0; }
+  .banner { display: none; margin: 0 0 18px; padding: 12px 14px; border-radius: 10px; font-size: 13.5px; }
+  .banner.show { display: block; }
+  .banner.warn { background: #3a3410; border: 1px solid #b4880f; color: #f0d489; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header><span class="dot" id="dot"></span><h1>Open Historia Node</h1></header>
+  <p class="sub"><b id="nodeId">…</b> · <span id="region">—</span> · v<span id="ver">—</span> · <span id="statusText">connecting…</span></p>
+
+  <div class="banner warn" id="drainBanner">Draining — players are moving to other nodes. This node will close automatically once they've all left.</div>
+
+  <div class="grid">
+    <div class="card"><div class="k">Players connected</div><div class="v"><span id="users">0</span><small> / <span id="maxUsers">—</span></small></div><div class="bar"><i id="usersBar"></i></div></div>
+    <div class="card"><div class="k">Peak players</div><div class="v" id="peak">0</div></div>
+    <div class="card"><div class="k">Requests served</div><div class="v" id="requests">0</div></div>
+    <div class="card"><div class="k">Data served</div><div class="v" id="bytes">0<small> MB</small></div></div>
+    <div class="card"><div class="k">Map objects</div><div class="v" id="objects">0</div></div>
+    <div class="card"><div class="k">Uptime</div><div class="v" id="uptime">0<small>m</small></div></div>
+  </div>
+
+  <div class="row">
+    <div>Public URL: <b><a id="publicUrl" href="#" target="_blank" rel="noopener">—</a></b></div>
+    <div>CPU threads: <b id="threads">—</b></div>
+    <div>Capacity: <b id="capacity">—</b></div>
+  </div>
+
+  <div class="actions">
+    <button id="shutdownBtn" class="danger">⏻ Graceful shutdown</button>
+    <button onclick="location.reload()">↻ Refresh</button>
+  </div>
+  <p class="note">Closing this window leaves the node running in the background — reopen it any time at <b>http://localhost:<span id="dashPort">4401</span></b>. Graceful shutdown first moves connected players to other nodes (their games are saved to their account), then closes the node.</p>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const fmtInt = (n) => Number(n || 0).toLocaleString();
+  const fmtUptime = (ms) => {
+    const s = Math.floor(ms / 1000), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    return h > 0 ? `${h}<small>h</small> ${m}<small>m</small>` : `${m}<small>m</small>`;
+  };
+  let draining = false;
+
+  async function poll() {
+    try {
+      const s = await (await fetch("/stats", { cache: "no-store" })).json();
+      $("nodeId").textContent = s.id || "node";
+      $("region").textContent = s.region || "—";
+      $("ver").textContent = s.version ?? "—";
+      $("users").textContent = fmtInt(s.currentUsers);
+      $("maxUsers").textContent = fmtInt(s.maxUsers);
+      $("usersBar").style.width = Math.min(100, (s.currentUsers / Math.max(1, s.maxUsers)) * 100) + "%";
+      $("peak").textContent = fmtInt(s.peakUsers);
+      $("requests").innerHTML = fmtInt(s.requests);
+      $("bytes").innerHTML = fmtInt(Math.round((s.bytes || 0) / 1048576)) + '<small> MB</small>';
+      $("objects").textContent = fmtInt(s.contentObjects);
+      $("uptime").innerHTML = fmtUptime(s.uptimeMs);
+      $("threads").textContent = s.threads ?? "—";
+      $("capacity").textContent = (s.maxUsers ?? "—") + " players";
+      $("dashPort").textContent = s.dashboardPort ?? location.port;
+      const pu = s.publicUrl || "";
+      $("publicUrl").textContent = pu || "not exposed yet";
+      if (pu) $("publicUrl").href = pu;
+      draining = !!s.draining;
+      const st = draining ? "draining" : (s.status || "active");
+      $("statusText").textContent = st;
+      $("dot").className = "dot" + (draining ? " draining" : (st === "banned" || st === "paused" ? " off" : ""));
+      $("drainBanner").classList.toggle("show", draining);
+      $("shutdownBtn").disabled = draining;
+    } catch {
+      $("dot").className = "dot off";
+      $("statusText").textContent = "node offline";
+    }
+  }
+
+  $("shutdownBtn").onclick = async () => {
+    if (!confirm("Gracefully shut down this node?\n\nConnected players will be moved to other nodes (their games are saved to their account), then the node closes.")) return;
+    $("shutdownBtn").disabled = true;
+    try { await fetch("/shutdown", { method: "POST" }); } catch { /* it's going down */ }
+    draining = true; $("drainBanner").classList.add("show"); $("dot").className = "dot draining";
+    $("statusText").textContent = "draining…";
+  };
+
+  poll();
+  setInterval(poll, 2000);
+</script>
+</body>
+</html>
