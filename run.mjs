@@ -3,8 +3,8 @@
 // node.config.json, optionally starts a Cloudflare Tunnel and captures its public
 // URL directly from cloudflared's output (reliable on every OS — no shell log
 // parsing), then launches the node with that URL.
-import { spawn } from "node:child_process";
-import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -67,6 +67,77 @@ if (!hasContent) {
   });
 }
 
+// --- Node-software auto-update ---------------------------------------------
+// The admin panel bumps a monotonic `swVersion` in the root-key-SIGNED node
+// directory (a forge-proof trigger — only the offline root key can raise it).
+// server.js watches for it and exits 75; we (the supervisor) pull the new code
+// and restart it. The tunnel keeps running throughout, so the node's public URL
+// is stable across updates.
+const UPDATE_EXIT = 75;
+const SW_STATE = path.join(__dirname, ".node-version.json");
+const readAppliedSw = () => { try { return Number(JSON.parse(readFileSync(SW_STATE, "utf8")).swVersion) || 0; } catch { return 0; } };
+const writeAppliedSw = (v) => { try { writeFileSync(SW_STATE, `${JSON.stringify({ swVersion: v, appliedAt: new Date().toISOString() }, null, 2)}\n`); } catch { /* best-effort */ } };
+
+// Fetch + cryptographically verify the signed directory; return its swVersion
+// (0 if unset/unreachable/invalid — an unverified directory can never trigger an update).
+const fetchSwVersion = async () => {
+  const dirUrl = cfg.directory;
+  if (!dirUrl) return 0;
+  try {
+    const [docRes, sigRes] = await Promise.all([
+      fetch(dirUrl, { cache: "no-store" }),
+      fetch(`${dirUrl}.sig`, { cache: "no-store" }),
+    ]);
+    if (!docRes.ok || !sigRes.ok) return 0;
+    const bytes = Buffer.from(await docRes.arrayBuffer());
+    const { verifySignedManifest } = await import("./lib/trust.js");
+    const { valid, data } = verifySignedManifest(bytes, await sigRes.text());
+    return valid ? (Number(data.swVersion) || 0) : 0;
+  } catch { return 0; }
+};
+
+const run = (cmd, args) => {
+  const r = spawnSync(cmd, args, { cwd: __dirname, stdio: "inherit", shell: process.platform === "win32" });
+  return r.status === 0;
+};
+
+// Pull the latest node code + reinstall deps, then record the applied version.
+// Git checkouts self-update; a plain-download install can't (git is required),
+// so we mark it applied to avoid a restart loop and tell the operator to update.
+const applyUpdate = async () => {
+  const target = await fetchSwVersion();
+  if (target <= readAppliedSw()) return; // nothing newer (or unverifiable)
+  if (!existsSync(path.join(__dirname, ".git"))) {
+    console.warn(`Update v${target} was requested, but this node isn't a git checkout — automatic updates need one.`);
+    console.warn("Re-install with:  git clone https://github.com/Open-Historia/open-historia-node   (or re-download the latest release).");
+    writeAppliedSw(target); // don't loop on an update we can't apply
+    return;
+  }
+  console.log(`Applying node software update v${target}…`);
+  const pulled = run("git", ["pull", "--ff-only"]) ||
+    (run("git", ["fetch", "origin", "main"]) && run("git", ["reset", "--hard", "origin/main"]));
+  if (!pulled) { console.warn("git pull failed — staying on the current version, will retry next cycle."); return; }
+  run("npm", ["install", "--omit=dev"]);
+  writeAppliedSw(target);
+  console.log(`Node software updated to v${target}.`);
+};
+
 const url = await startTunnel();
 if (url) process.env.OH_NODE_PUBLIC_URL = url;
-await import("./server.js");
+
+// On a fresh install adopt the current version without updating (the download is
+// already current) — only future bumps trigger an update.
+if (!existsSync(SW_STATE)) writeAppliedSw(await fetchSwVersion());
+
+// Supervise the content server: relaunch it whenever it exits asking for an
+// update (75), applying the update in between. Any other exit ends the process.
+for (;;) {
+  const code = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(__dirname, "server.js")], { stdio: "inherit", env: process.env });
+    child.on("exit", (c) => resolve(c ?? 0));
+    child.on("error", (e) => { console.error(`node server failed to start: ${e.message}`); resolve(1); });
+  });
+  if (code !== UPDATE_EXIT) process.exit(code);
+  await applyUpdate();
+  console.log("Restarting node server…");
+}

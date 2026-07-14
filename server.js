@@ -55,8 +55,10 @@ const currentUsers = () => {
 };
 const statusBody = () => {
   const users = currentUsers();
+  // No operator name here — this endpoint is public. The operator is sent only in
+  // registration (to the private admin record), never broadcast to players.
   return {
-    id: identity.id, region: REGION, operator: OPERATOR, version: NODE_VERSION, status: control.status,
+    id: identity.id, region: REGION, version: NODE_VERSION, status: control.status,
     threads: THREADS, maxUsers: MAX_USERS, currentUsers: users, full: users >= MAX_USERS,
   };
 };
@@ -83,6 +85,15 @@ const identity = loadIdentity();
 
 // Live control state, refreshed from the signed directory.
 const control = { status: "pending", rateLimit: DEFAULT_RATE_LIMIT, redirect: null };
+
+// Applied node-software version (written by run.mjs after an update). When the
+// signed directory's swVersion climbs past this, we exit 75 so run.mjs pulls the
+// new code and restarts us.
+const SW_STATE = path.join(__dirname, ".node-version.json");
+const appliedSwVersion = () => {
+  try { return Number(JSON.parse(fs.readFileSync(SW_STATE, "utf8")).swVersion) || 0; } catch { return 0; }
+};
+const UPDATE_EXIT_CODE = 75;
 
 // --- Content server ---
 const listContentHashes = () => {
@@ -240,6 +251,12 @@ const refreshControl = async () => {
       return;
     }
     void base;
+    // Software-update signal (admin bumped swVersion in the signed, verified
+    // directory). Exit so the run.mjs supervisor pulls the new code + restarts.
+    if ((Number(data.swVersion) || 0) > appliedSwVersion()) {
+      console.log(`Node software update v${Number(data.swVersion)} requested — restarting to apply…`);
+      process.exit(UPDATE_EXIT_CODE);
+    }
     const self = (data.nodes || []).find((n) => n.id === identity.id);
     if (!self) {
       control.status = "pending"; // accepted nodes appear here; not listed = pending
