@@ -59,8 +59,11 @@ const clientIp = (req) =>
   req.headers["cf-connecting-ip"]
   || String(req.headers["x-forwarded-for"] || "").split(",")[0].trim()
   || req.socket.remoteAddress || "unknown";
-const touchUser = (req) => { activeUsers.set(clientIp(req), Date.now()); };
-const dropUser = (req) => { activeUsers.delete(clientIp(req)); };
+// Set by the dashboard's live stream (further down) so a player joining or leaving
+// is pushed to the operator instantly. A no-op while no dashboard tab is open.
+let onUsersChanged = () => {};
+const touchUser = (req) => { activeUsers.set(clientIp(req), Date.now()); onUsersChanged(); };
+const dropUser = (req) => { activeUsers.delete(clientIp(req)); onUsersChanged(); };
 const currentUsers = () => {
   const cutoff = Date.now() - USER_WINDOW_MS;
   let n = 0;
@@ -573,10 +576,37 @@ const gracefulShutdown = () => {
 
 const dash = express();
 dash.disable("x-powered-by");
+const dashPayload = () => ({ ...statsPayload(), publicUrl: publicUrl(), dashboardPort: DASHBOARD_PORT });
 dash.get("/stats", (req, res) => {
   res.setHeader("Cache-Control", "no-store");
-  res.json({ ...statsPayload(), publicUrl: publicUrl(), dashboardPort: DASHBOARD_PORT });
+  res.json(dashPayload());
 });
+
+// Live stats stream. The dashboard used to poll every 2s; now the node PUSHES, so a
+// player joining or leaving lands on the operator's screen instantly. Local-only
+// (127.0.0.1), so the cost is one open connection per open dashboard tab.
+const sseClients = new Set();
+const pushStats = () => {
+  if (!sseClients.size) return;
+  const frame = `data: ${JSON.stringify(dashPayload())}\n\n`;
+  for (const res of sseClients) { try { res.write(frame); } catch { sseClients.delete(res); } }
+};
+dash.get("/events", (req, res) => {
+  res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store", Connection: "keep-alive" });
+  res.write(`data: ${JSON.stringify(dashPayload())}\n\n`); // prime the UI right away
+  sseClients.add(res);
+  req.on("close", () => sseClients.delete(res));
+});
+// Player count changes push immediately (that's the one that must feel live); the
+// slow tick keeps requests/bytes/uptime ticking over while nothing else happens.
+let lastPushedUsers = -1;
+onUsersChanged = () => {
+  if (!sseClients.size) return;
+  const n = currentUsers();
+  if (n !== lastPushedUsers) { lastPushedUsers = n; pushStats(); }
+};
+const statsTick = setInterval(() => { if (sseClients.size) pushStats(); }, 2000);
+if (typeof statsTick.unref === "function") statsTick.unref();
 dash.post("/shutdown", (req, res) => { res.json({ ok: true, draining: true }); gracefulShutdown(); });
 dash.get("/", (req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");

@@ -79,9 +79,18 @@
   };
   let draining = false;
 
+  function offline() {
+    $("dot").className = "dot off";
+    $("statusText").textContent = "node offline";
+  }
+
   async function poll() {
+    try { render(await (await fetch("/stats", { cache: "no-store" })).json()); }
+    catch { offline(); }
+  }
+
+  function render(s) {
     try {
-      const s = await (await fetch("/stats", { cache: "no-store" })).json();
       $("nodeId").textContent = s.id || "node";
       $("region").textContent = s.region || "—";
       $("ver").textContent = s.version ?? "—";
@@ -106,8 +115,7 @@
       $("drainBanner").classList.toggle("show", draining);
       $("shutdownBtn").disabled = draining;
     } catch {
-      $("dot").className = "dot off";
-      $("statusText").textContent = "node offline";
+      offline();
     }
   }
 
@@ -119,8 +127,17 @@
     $("statusText").textContent = "draining…";
   };
 
-  poll();
-  setInterval(poll, 2000);
+  // The node pushes stats live, so a player joining or leaving shows up instantly
+  // instead of on the next tick — no polling. EventSource reconnects by itself if
+  // the stream drops; only fall back to polling if the browser lacks EventSource.
+  if (window.EventSource) {
+    const es = new EventSource("/events");
+    es.onmessage = (e) => { try { render(JSON.parse(e.data)); } catch { /* skip a bad frame */ } };
+    es.onerror = () => offline();
+  } else {
+    poll();
+    setInterval(poll, 2000);
+  }
 </script>
 </body>
 </html>
