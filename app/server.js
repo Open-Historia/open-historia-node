@@ -105,7 +105,11 @@ const identity = loadIdentity();
 // Live control state, refreshed from the signed directory. Nodes are accepted
 // automatically, so we default to active; the signed directory only ever
 // downgrades us to paused/banned.
-const control = { status: "active", rateLimit: DEFAULT_RATE_LIMIT, redirect: null };
+// What the SIGNED directory is allowed to tell this node about itself. Only its
+// status: the rate limit is fixed (it protects the volunteer, so it isn't an admin
+// knob), and the old `redirect` field was never acted on — players are moved by
+// pausing a node, which makes clients fail over on their own.
+const control = { status: "active" };
 
 // Operator-dashboard metrics + drain state. A node is "draining" when it's
 // shutting down, or the signed directory has paused/banned it. While draining it
@@ -248,7 +252,9 @@ app.use((req, res, next) => {
   return next();
 });
 
-// Per-IP fixed-window rate limit (admin can tighten via the signed directory).
+// Per-IP fixed-window rate limit. This is what stops one client turning a
+// volunteer's home connection into a bandwidth sink, so it is NOT admin-tunable —
+// every node self-enforces the same cap (override locally with OH_NODE_RATE_LIMIT).
 const hits = new Map();
 const rateTimer = setInterval(() => hits.clear(), 60000);
 if (typeof rateTimer.unref === "function") rateTimer.unref();
@@ -258,7 +264,7 @@ app.use((req, res, next) => {
     || req.socket.remoteAddress || "unknown";
   const count = (hits.get(ip) || 0) + 1;
   hits.set(ip, count);
-  if (count > control.rateLimit) {
+  if (count > DEFAULT_RATE_LIMIT) {
     res.setHeader("Retry-After", "60");
     return res.status(429).json({ error: "Rate limit exceeded." });
   }
@@ -504,13 +510,9 @@ const refreshControl = async () => {
     }
     if (!self) {
       control.status = "active"; // auto-accepted: not listed = not banned = active
-      control.rateLimit = DEFAULT_RATE_LIMIT;
-      control.redirect = null;
       return;
     }
     control.status = self.status || "active";
-    control.rateLimit = Number.isFinite(Number(self.rateLimit)) && Number(self.rateLimit) > 0 ? Number(self.rateLimit) : DEFAULT_RATE_LIMIT;
-    control.redirect = self.redirect || null;
   } catch (error) {
     console.warn(`directory poll failed: ${error.message}`);
   }
