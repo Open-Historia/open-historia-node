@@ -48,13 +48,19 @@ const HASH_RE = /^[a-f0-9]{64}$/;
 const THREADS = Math.max(1, os.cpus()?.length || 1);
 const USERS_PER_THREAD = Math.max(1, Number(env("OH_NODE_USERS_PER_THREAD", 20)));
 const MAX_USERS = THREADS * USERS_PER_THREAD;
-const USER_WINDOW_MS = 5 * 60 * 1000;
+// A player counts as active if we've seen them within this window. The web client
+// heartbeats every 20s, but browsers throttle background tabs to roughly once a
+// minute, so keep enough slack that a backgrounded player isn't dropped. Closing
+// the tab doesn't wait for this at all: the client fires a /oh/v1/leave beacon and
+// is dropped immediately — this window is just the backstop for crashes/kills.
+const USER_WINDOW_MS = 2 * 60 * 1000;
 const activeUsers = new Map(); // ip -> lastSeen (ms)
 const clientIp = (req) =>
   req.headers["cf-connecting-ip"]
   || String(req.headers["x-forwarded-for"] || "").split(",")[0].trim()
   || req.socket.remoteAddress || "unknown";
 const touchUser = (req) => { activeUsers.set(clientIp(req), Date.now()); };
+const dropUser = (req) => { activeUsers.delete(clientIp(req)); };
 const currentUsers = () => {
   const cutoff = Date.now() - USER_WINDOW_MS;
   let n = 0;
@@ -182,10 +188,45 @@ const fetchAndCacheBundle = async (src) => {
   return { buffer, hash };
 };
 
+// --- Mirror index: source URL -> content hash of bundles we've already fetched.
+// The content cache is keyed by HASH, but the hub proxy is asked by URL, so
+// without this a repeat request for a scenario we ALREADY have would re-download
+// it from GitHub every time. We computed and verified that hash ourselves on the
+// first fetch, so content/<hash> is by definition exactly those bytes — serving
+// it back is as trustworthy as re-fetching, just instant and free. ---
+const MIRROR_INDEX_PATH = path.join(DATA_DIR, "mirror-index.json");
+const MAX_MIRROR_INDEX = 5000; // bounded so the index can't grow forever
+let mirrorIndex = {};
+try { mirrorIndex = JSON.parse(fs.readFileSync(MIRROR_INDEX_PATH, "utf8")) || {}; } catch { mirrorIndex = {}; }
+
+const rememberMirror = (src, hash) => {
+  try {
+    mirrorIndex[src] = hash;
+    const keys = Object.keys(mirrorIndex);
+    // Oldest-first trim (JS objects keep insertion order for string keys).
+    if (keys.length > MAX_MIRROR_INDEX) {
+      for (const k of keys.slice(0, keys.length - MAX_MIRROR_INDEX)) delete mirrorIndex[k];
+    }
+    fs.writeFileSync(MIRROR_INDEX_PATH, JSON.stringify(mirrorIndex));
+  } catch { /* remembering is best-effort — worst case we re-fetch next time */ }
+};
+
+// A bundle we mirrored before and still have on disk, or null.
+const cachedMirror = (src) => {
+  const hash = mirrorIndex[src];
+  if (!hash || !HASH_RE.test(hash)) return null;
+  const file = path.join(CONTENT_DIR, hash);
+  if (path.dirname(path.resolve(file)) !== CONTENT_DIR) return null; // containment
+  try { if (fs.existsSync(file)) return { file, hash }; } catch { /* fall through */ }
+  delete mirrorIndex[src]; // the cached file went away — fetch it again next time
+  return null;
+};
+
 // Hash-addressed mirror: cache the bundle and report whether it matched the hash
 // the caller asked for (so /content/<hash>?src= only 404s, never serves a mismatch).
 const mirrorCommunityContent = async (hash, src) => {
   const result = await fetchAndCacheBundle(src);
+  if (result) rememberMirror(src, result.hash);
   return !!result && result.hash === hash;
 };
 
@@ -253,6 +294,18 @@ app.get("/oh/v1/ping", (req, res) => {
   touchUser(req);
   res.setHeader("Cache-Control", "no-store");
   res.json(statusBody());
+});
+
+// Leaving: the web client calls this when its tab closes (a keepalive fetch, so it
+// still goes out during unload), dropping that player from the count immediately
+// instead of waiting out USER_WINDOW_MS. It's a GET because a node deliberately
+// accepts GET/HEAD only — and it's safe to expose: the most it can do is remove the
+// CALLER's own IP from an in-memory count, which their next heartbeat puts back.
+// Best-effort — a crashed client never sends it and just ages out of the window.
+app.get("/oh/v1/leave", (req, res) => {
+  dropUser(req);
+  res.setHeader("Cache-Control", "no-store");
+  res.status(204).end();
 });
 
 // Wake-up: the admin panel hits this right after banning/pausing/updating so the
@@ -336,6 +389,23 @@ app.get("/oh/v1/hub", async (req, res) => {
   touchUser(req);
   const src = req.query.url ? String(req.query.url) : "";
   if (!isAllowedMirrorUrl(src)) return res.status(400).json({ error: "Only GitHub-hosted URLs are allowed." });
+
+  // Already mirrored? Serve our own verified copy and skip GitHub entirely. The
+  // importer logs the install as a separate call, so it still counts either way.
+  const hit = cachedMirror(src);
+  if (hit) {
+    const { size } = fs.statSync(hit.file);
+    stats.requests += 1;
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader("Content-Length", String(size));
+    res.setHeader("X-OH-Content-Hash", hit.hash);
+    res.setHeader("X-OH-Cache", "hit");
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    if (req.method === "HEAD") return res.status(200).end();
+    stats.bytes += size;
+    return fs.createReadStream(hit.file).pipe(res);
+  }
+
   if (inflightMirrors >= MAX_INFLIGHT_MIRRORS) {
     res.setHeader("Retry-After", "5");
     return res.status(503).json({ error: "Node busy; retry shortly." });
@@ -344,9 +414,13 @@ app.get("/oh/v1/hub", async (req, res) => {
   try {
     const result = await fetchAndCacheBundle(src);
     if (!result) return res.status(502).json({ error: "Could not fetch that bundle." });
+    rememberMirror(src, result.hash); // next request for this bundle is served locally
+    stats.requests += 1;
+    stats.bytes += result.buffer.length;
     res.setHeader("Content-Type", "application/octet-stream");
     res.setHeader("Content-Length", String(result.buffer.length));
     res.setHeader("X-OH-Content-Hash", result.hash);
+    res.setHeader("X-OH-Cache", "miss");
     res.setHeader("Cache-Control", "public, max-age=86400");
     if (req.method === "HEAD") return res.status(200).end();
     return res.status(200).end(result.buffer);
