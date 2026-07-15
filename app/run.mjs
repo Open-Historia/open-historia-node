@@ -34,7 +34,8 @@ const DATA_DIR = process.env.OH_NODE_DATA_DIR || path.join(__dirname, "data");
 const PUBLIC_URL_FILE = path.join(DATA_DIR, "public-url.txt");
 
 let tunnel = null;
-const cleanup = () => { if (tunnel) { try { tunnel.kill(); } catch { /* ignore */ } } };
+let stoppingTunnel = false; // true while WE kill it, so the exit handler doesn't fight us
+const cleanup = () => { stoppingTunnel = true; if (tunnel) { try { tunnel.kill(); } catch { /* ignore */ } } };
 process.on("exit", cleanup);
 for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { cleanup(); process.exit(0); });
 
@@ -85,6 +86,18 @@ const startTunnel = () => new Promise((resolve) => {
   tunnel.stdout.on("data", scan);
   tunnel.stderr.on("data", scan);
   tunnel.on("error", (e) => { console.warn(`cloudflared failed to start: ${e.message}`); finish(null); });
+  // A tunnel that dies takes the node off the network SILENTLY: server.js keeps
+  // serving localhost happily and keeps re-registering, so the registry (and the
+  // operator's dashboard) still say "active" while nobody can reach it. Nothing
+  // used to notice — which is why a 16-hour node went dark and only a full
+  // close-and-reopen fixed it, while an update did not: an update restarts
+  // server.js and deliberately leaves the tunnel alone (see UPDATE_EXIT below),
+  // so it restarted the half that was fine.
+  tunnel.on("exit", (code, signal) => {
+    if (stoppingTunnel) return; // we're shutting down on purpose
+    console.warn(`Cloudflare Tunnel exited (${signal || `code ${code}`}) — the node is unreachable until it is back. Restarting it…`);
+    restartTunnel("cloudflared exited");
+  });
   // Don't block startup forever. After 120s, start serving locally anyway; the
   // scan above stays attached, so once the tunnel is up the URL is captured and
   // the node registers on its next cycle (~30s) with no restart needed.
@@ -93,6 +106,72 @@ const startTunnel = () => new Promise((resolve) => {
     finish(null);
   }, 120000);
 });
+
+// --- Keeping the tunnel alive ------------------------------------------------
+// Two ways a long-running node goes dark, both invisible from the inside:
+//   1. cloudflared exits — handled by the exit hook above.
+//   2. cloudflared is still running but its tunnel no longer routes. Quick
+//      tunnels are anonymous and disposable; Cloudflare is free to drop one, and
+//      a process that thinks it is connected will not tell us.
+// Only an OUTSIDE-IN check can tell the difference, so we fetch our own public
+// URL: out to Cloudflare's edge and back down the tunnel. If that round trip
+// fails repeatedly, the tunnel is the problem — restart it, not the server.
+const REACH_CHECK_MS = 5 * 60 * 1000;   // gentle: this is a keep-honest check, not a heartbeat
+const REACH_FAILS_BEFORE_RESTART = 3;   // ~15 min of failure before we act, so a blip is not a restart
+const TUNNEL_RESTART_BACKOFF_MS = 15000;
+let reachFails = 0;
+let restartingTunnel = false;
+
+const restartTunnel = async (why) => {
+  if (restartingTunnel || stoppingTunnel) return;
+  restartingTunnel = true;
+  reachFails = 0;
+  try {
+    if (tunnel) {
+      stoppingTunnel = true;               // suppress our own exit hook for this kill
+      try { tunnel.kill(); } catch { /* already gone */ }
+      await new Promise((r) => setTimeout(r, 2000));
+      stoppingTunnel = false;
+    }
+    await new Promise((r) => setTimeout(r, TUNNEL_RESTART_BACKOFF_MS));
+    console.log(`Restarting the Cloudflare Tunnel (${why})…`);
+    // A quick tunnel comes back with a NEW hostname. capture() writes it to
+    // public-url.txt, and server.js re-registers as soon as it sees the change —
+    // so the directory follows us to the new URL without a full node restart.
+    const next = await startTunnel();
+    if (next) console.log(`Tunnel is back at ${next} — re-registering.`);
+    else console.warn("Tunnel restart did not produce a URL yet; will keep checking.");
+  } finally {
+    restartingTunnel = false;
+  }
+};
+
+const currentPublicUrl = () => {
+  if (process.env.OH_NODE_PUBLIC_URL) return process.env.OH_NODE_PUBLIC_URL;
+  try { return readFileSync(PUBLIC_URL_FILE, "utf8").trim() || null; } catch { return null; }
+};
+
+const watchReachability = () => setInterval(async () => {
+  if (restartingTunnel || stoppingTunnel) return;
+  const url = currentPublicUrl();
+  if (!url) return; // nothing published yet — startTunnel's own logging covers this
+  let ok = false;
+  try {
+    const res = await fetch(`${url.replace(/\/$/, "")}/oh/v1/health`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(20000),
+    });
+    ok = res.ok;
+  } catch { ok = false; }
+  if (ok) {
+    if (reachFails > 0) console.log("Node is reachable again.");
+    reachFails = 0;
+    return;
+  }
+  reachFails += 1;
+  console.warn(`Node did not answer on its public URL (${reachFails}/${REACH_FAILS_BEFORE_RESTART}) — ${url}`);
+  if (reachFails >= REACH_FAILS_BEFORE_RESTART) restartTunnel("public URL stopped answering");
+}, REACH_CHECK_MS);
 
 // Self-heal an empty content folder (the installer's populate was skipped or
 // failed): download the map assets before serving, so a node never registers
@@ -272,6 +351,14 @@ const applyUpdate = async () => {
 
 const url = await startTunnel();
 if (url) process.env.OH_NODE_PUBLIC_URL = url;
+
+// Watch the tunnel for the rest of this process's life. Only meaningful when WE
+// own a tunnel: with tunnel "none" the operator fronts the node themselves (a
+// reverse proxy, a port-forward) and it is not ours to restart.
+if ((cfg.tunnel || "none") !== "none" && existsSync(cfBin)) {
+  const reachTimer = watchReachability();
+  if (typeof reachTimer.unref === "function") reachTimer.unref();
+}
 
 // Startup version reconciliation (runs on every launch — start.bat, start.vbs,
 // or the installer starting the node — since they all run this file):

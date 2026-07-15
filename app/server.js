@@ -445,6 +445,11 @@ app.use((req, res) => res.status(404).json({ error: "Not found." }));
 // --- Self-registration: announce this node to the project registry as pending.
 // The registration is signed with the node's key so its id can't be hijacked. ---
 let registered = false;
+// The URL our last SUCCESSFUL registration announced. A quick tunnel comes back
+// with a new hostname after a restart, so "registered" alone is not enough: the
+// directory would keep pointing at the dead one until the 15-min refresh. Compare
+// against this and re-register the moment the URL actually changes.
+let registeredUrl = "";
 const register = async () => {
   const url = publicUrl();
   if (!REGISTRY_URL || !url) return;
@@ -469,8 +474,14 @@ const register = async () => {
       headers: { "Content-Type": "application/json", "X-Node-Signature": signature },
       body,
     });
-    if (res.ok) { registered = true; console.log(`Registered with the registry as ${(await res.json().catch(() => ({}))).status || "pending"}.`); }
-    else console.warn(`registry: HTTP ${res.status}`);
+    if (res.ok) {
+      const changed = registeredUrl && registeredUrl !== url;
+      registered = true;
+      registeredUrl = url;
+      console.log(changed
+        ? `Re-registered at the new tunnel URL: ${url}`
+        : `Registered with the registry as ${(await res.json().catch(() => ({}))).status || "active"}.`);
+    } else console.warn(`registry: HTTP ${res.status}`);
   } catch (error) {
     console.warn(`registry unreachable: ${error.message}`);
   }
@@ -545,7 +556,13 @@ const server = app.listen(...listenArgs, async () => {
   // every 30s so a tunnel URL that arrives after startup registers promptly
   // instead of waiting a full 15-min cycle.
   const registerTimer = setInterval(register, 15 * 60 * 1000);
-  const fastRegisterTimer = setInterval(() => { if (!registered) register(); }, 30 * 1000);
+  // Also re-register the moment our public URL CHANGES. run.mjs restarts a dead
+  // tunnel and a quick tunnel returns with a new hostname; without this the
+  // directory would keep sending players to the old one for up to 15 minutes.
+  // publicUrl() re-reads the file run.mjs writes, so this needs no signalling.
+  const fastRegisterTimer = setInterval(() => {
+    if (!registered || (publicUrl() && publicUrl() !== registeredUrl)) register();
+  }, 30 * 1000);
   const controlTimer = setInterval(refreshControl, 5 * 60 * 1000);
   for (const t of [registerTimer, fastRegisterTimer, controlTimer]) {
     if (typeof t.unref === "function") t.unref();
