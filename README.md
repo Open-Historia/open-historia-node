@@ -48,11 +48,12 @@ so players can reach you, and a `start` script — and walks you through it.
 
 The installer writes a **`start`** script (`start.bat` / `start.command` / `start.sh`)
 that launches the tunnel **and** the node together. Your node then **registers with the
-project as `pending`**.
+project and starts serving right away** — there's nothing to wait for.
 
-> **No player traffic reaches your node until an admin accepts it.** The game only ever
-> contacts nodes in the project's *signed* directory, so an unapproved (or banned) node
-> simply receives nothing.
+> **What players actually reach.** The game only ever contacts nodes listed in the
+> project's *signed* directory, which the maintainers publish. Your node is added
+> automatically, and an admin can pause or remove it from that directory at any time —
+> a node dropped from it simply receives nothing.
 
 ## What's in the folder
 
@@ -76,13 +77,14 @@ If you'd rather wire it up yourself, expose `http://localhost:4400` over HTTPS w
 Cloudflare Tunnel (`cloudflared tunnel --url http://localhost:4400`), a reverse proxy
 (Caddy/nginx), or a port-forward, and pass that URL as `OH_NODE_PUBLIC_URL`.
 
-## Getting accepted
+## Once you're running
 
 After your node is running and publicly reachable:
 
-1. It appears to the project admins as a **pending** node.
-2. An admin reviews it and **accepts** it into the signed node directory.
-3. Players automatically start using it — no action needed on your side.
+1. It registers itself with the project and is listed in the signed node directory.
+2. Players start using it automatically — no action needed on your side.
+3. Admins can pause or remove a node from the directory (for example if it's serving
+   bad data or is offline more than it's up); it then stops receiving traffic.
 
 You can check your node's status any time at `http://localhost:4400/oh/v1/health`.
 
