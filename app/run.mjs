@@ -66,6 +66,7 @@ const startTunnel = () => new Promise((resolve) => {
     // spawning the server) and a file (used when the tunnel comes up LATE, after
     // the server already started — server.js re-reads this on every register try).
     process.env.OH_NODE_PUBLIC_URL = u;
+    urlBornAt = Date.now(); // reachability grants a fresh URL a DNS warm-up grace
     try { mkdirSync(DATA_DIR, { recursive: true }); writeFileSync(PUBLIC_URL_FILE, u); } catch { /* best-effort */ }
   };
   const scan = (buf) => {
@@ -116,11 +117,20 @@ const startTunnel = () => new Promise((resolve) => {
 // Only an OUTSIDE-IN check can tell the difference, so we fetch our own public
 // URL: out to Cloudflare's edge and back down the tunnel. If that round trip
 // fails repeatedly, the tunnel is the problem — restart it, not the server.
-const REACH_CHECK_MS = 5 * 60 * 1000;   // gentle: this is a keep-honest check, not a heartbeat
-const REACH_FAILS_BEFORE_RESTART = 3;   // ~15 min of failure before we act, so a blip is not a restart
+const REACH_CHECK_MS = 5 * 60 * 1000;   // gentle while healthy: a keep-honest check, not a heartbeat
+const REACH_RECHECK_MS = 60 * 1000;     // while failing: probe fast, so a dead tunnel rotates in minutes, not a quarter hour
+const REACH_FAILS_BEFORE_RESTART = 3;   // still three real strikes before we act, so a blip is not a restart
+// A just-minted quick-tunnel hostname can lag in DNS for a minute or two —
+// Cloudflare prints the URL before the record is everywhere (we've watched a
+// fresh tunnel NXDOMAIN even at 1.1.1.1). That warm-up must not count strikes
+// or scare the operator; a tunnel that is still unreachable after this window
+// is genuinely dead-on-arrival and starts striking.
+const URL_GRACE_MS = 2 * 60 * 1000;
 const TUNNEL_RESTART_BACKOFF_MS = 15000;
 let reachFails = 0;
 let restartingTunnel = false;
+let urlBornAt = 0;        // when the current public URL was captured (0 = config/named URL, no grace needed)
+let lastCheckedUrl = null;
 
 const restartTunnel = async (why) => {
   if (restartingTunnel || stoppingTunnel) return;
@@ -151,27 +161,51 @@ const currentPublicUrl = () => {
   try { return readFileSync(PUBLIC_URL_FILE, "utf8").trim() || null; } catch { return null; }
 };
 
-const watchReachability = () => setInterval(async () => {
-  if (restartingTunnel || stoppingTunnel) return;
-  const url = currentPublicUrl();
-  if (!url) return; // nothing published yet — startTunnel's own logging covers this
-  let ok = false;
-  try {
-    const res = await fetch(`${url.replace(/\/$/, "")}/oh/v1/health`, {
-      cache: "no-store",
-      signal: AbortSignal.timeout(20000),
-    });
-    ok = res.ok;
-  } catch { ok = false; }
-  if (ok) {
-    if (reachFails > 0) console.log("Node is reachable again.");
-    reachFails = 0;
-    return;
-  }
-  reachFails += 1;
-  console.warn(`Node did not answer on its public URL (${reachFails}/${REACH_FAILS_BEFORE_RESTART}) — ${url}`);
-  if (reachFails >= REACH_FAILS_BEFORE_RESTART) restartTunnel("public URL stopped answering");
-}, REACH_CHECK_MS);
+// Self-scheduling (not a fixed interval): healthy nodes are probed gently every
+// 5 minutes, but the moment a check fails the cadence tightens to every minute —
+// a tunnel that came up dead now rotates to a fresh hostname in single-digit
+// minutes instead of pinning an unreachable URL in the directory for 15+.
+const watchReachability = () => {
+  const schedule = (ms) => {
+    const timer = setTimeout(check, ms);
+    if (typeof timer.unref === "function") timer.unref();
+    return timer;
+  };
+  const check = async () => {
+    if (stoppingTunnel) return;
+    if (restartingTunnel) return schedule(REACH_RECHECK_MS);
+    const url = currentPublicUrl();
+    if (!url) return schedule(REACH_RECHECK_MS); // waiting on a tunnel — look again soon
+    if (url !== lastCheckedUrl) {
+      // A new URL starts with a clean slate — strikes against the old hostname
+      // say nothing about this one.
+      lastCheckedUrl = url;
+      reachFails = 0;
+    }
+    let ok = false;
+    try {
+      const res = await fetch(`${url.replace(/\/$/, "")}/oh/v1/health`, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(20000),
+      });
+      ok = res.ok;
+    } catch { ok = false; }
+    if (ok) {
+      if (reachFails > 0) console.log("Node is reachable again.");
+      reachFails = 0;
+      return schedule(REACH_CHECK_MS);
+    }
+    if (urlBornAt && Date.now() - urlBornAt < URL_GRACE_MS) {
+      console.log(`Public URL not answering yet (fresh tunnel, DNS may still be propagating) — ${url}`);
+      return schedule(REACH_RECHECK_MS);
+    }
+    reachFails += 1;
+    console.warn(`Node did not answer on its public URL (${reachFails}/${REACH_FAILS_BEFORE_RESTART}) — ${url}`);
+    if (reachFails >= REACH_FAILS_BEFORE_RESTART) await restartTunnel("public URL stopped answering");
+    return schedule(REACH_RECHECK_MS);
+  };
+  return schedule(REACH_CHECK_MS);
+};
 
 // Self-heal an empty content folder (the installer's populate was skipped or
 // failed): download the map assets before serving, so a node never registers
