@@ -73,8 +73,12 @@ const startTunnel = () => new Promise((resolve) => {
     // Accumulate: cloudflared prints the URL inside an ASCII box and can split
     // one line across two stdout writes, so matching each chunk alone would miss
     // it. Keep scanning even after we resolve, to catch a late/renewed URL.
+    // NB the negative lookahead: cloudflared's own API endpoint shows up in its
+    // ERROR lines ("failed to request quick Tunnel: Post https://api.trycloudflare.com/…")
+    // and a node once captured it as its public URL and registered it in the
+    // live directory. Only an assigned hostname counts.
     acc += String(buf);
-    const m = acc.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+    const m = acc.match(/https:\/\/(?!api\.trycloudflare\.com)[a-z0-9-]+\.trycloudflare\.com/);
     if (m) {
       console.log(done ? `Tunnel is up — registering now at ${m[0]}` : `Your node is reachable at ${m[0]}`);
       capture(m[0]);
@@ -97,6 +101,12 @@ const startTunnel = () => new Promise((resolve) => {
   tunnel.on("exit", (code, signal) => {
     if (stoppingTunnel) return; // we're shutting down on purpose
     console.warn(`Cloudflare Tunnel exited (${signal || `code ${code}`}) — the node is unreachable until it is back. Restarting it…`);
+    // Don't hold boot hostage: if cloudflared died before ever printing a URL,
+    // the startup await would otherwise sit out the full 120s timeout ("Tunnel
+    // URL not detected yet…" minutes after the REPLACEMENT tunnel was already
+    // up). Resolve now — the restart below brings the tunnel back and capture()
+    // publishes the new URL the moment it lands.
+    finish(null);
     restartTunnel("cloudflared exited");
   });
   // Don't block startup forever. After 120s, start serving locally anyway; the
