@@ -394,8 +394,8 @@ if ((cfg.tunnel || "none") !== "none" && existsSync(cfBin)) {
   if (typeof reachTimer.unref === "function") reachTimer.unref();
 }
 
-// Startup version reconciliation (runs on every launch — start.bat, start.vbs,
-// or the installer starting the node — since they all run this file):
+// Startup version reconciliation (runs on every launch — start.bat, start.sh,
+// start.command, or the installer starting the node — since they all run this file):
 //  - Fresh install: adopt the current signed version without updating (the
 //    download is already current).
 //  - Existing install: check ONCE for an update we may have missed while offline
