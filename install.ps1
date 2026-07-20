@@ -1,7 +1,7 @@
 # Open Historia - content node one-click installer (Windows).
 # Double-click install.bat (which runs this). It installs dependencies, downloads
 # the map content, downloads cloudflared, sets up a Cloudflare Tunnel so players
-# can reach your node, and writes start.bat to run everything.
+# can reach your node, and writes start.bat to run everything (double-click it).
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
 
@@ -149,26 +149,22 @@ node app\run.mjs
 pause
 "@
 Set-Content -Path (Join-Path $PSScriptRoot "start.bat") -Value $startBat -Encoding ASCII
-# Hidden launcher: runs the node with NO console window. The operator dashboard
-# opens automatically in the browser and is the interface instead of a terminal.
-$startVbs = @"
-Set sh = CreateObject("WScript.Shell")
-sh.CurrentDirectory = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName)
-sh.Run "node app\run.mjs", 0, False
-"@
-Set-Content -Path (Join-Path $PSScriptRoot "start.vbs") -Value $startVbs -Encoding ASCII
+# Old installs may have a start.vbs from a previous version — Windows now blocks
+# or deprecates the Windows Script Host it needs, so remove it: start.bat is the
+# one launcher.
+$oldVbs = Join-Path $PSScriptRoot "start.vbs"
+if (Test-Path $oldVbs) { Remove-Item $oldVbs -Force }
 
 Write-Host ""
 Write-Host "================= Setup complete! =================" -ForegroundColor Green
-Write-Host "  1. Start your node any time: double-click start.vbs (no console window -"
-Write-Host "     the dashboard opens in your browser). Use start.bat to watch the logs."
+Write-Host "  1. Start your node any time: double-click start.bat."
 Write-Host "  2. It registers with the project and is accepted automatically."
 Write-Host "  3. Manage it from the dashboard: live stats + a graceful shutdown button."
 Write-Host "==================================================="
 $startNow = Read-Host "Start the node now? (y/N)"
 if ($startNow -match "^[Yy]") {
   # Quote the path — a home folder with a space (e.g. C:\Users\Nicholas Krol) would
-  # otherwise be split and wscript would try to run "C:\Users\Nicholas".
-  $vbs = Join-Path $PSScriptRoot "start.vbs"
-  Start-Process "wscript.exe" -ArgumentList "`"$vbs`""
+  # otherwise be split and cmd would try to run "C:\Users\Nicholas".
+  $bat = Join-Path $PSScriptRoot "start.bat"
+  Start-Process "cmd.exe" -ArgumentList "/c", "`"$bat`""
 }
