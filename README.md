@@ -25,6 +25,16 @@ Every byte your node sends is re-hashed by the player's browser against a
 project-**signed** manifest before it's trusted. So even a hacked node can't feed
 players bad data — the worst it can do is get ignored.
 
+### What your node does see, and what is recorded about you
+
+Like any server, your node sees the **IP address** and browser type of each player it serves, and which files they ask for. That is personal data, and it is theirs:
+
+- the node software keeps visitors' addresses **in memory only**, for about two minutes, to count how many players are connected and to limit request rates. It writes none of them to disk or to a log;
+- **do not log, keep or share players' addresses**, and do not put anything in front of your node that does (an access log, analytics). Use them for nothing but serving the files;
+- if you expose your node through a Cloudflare Tunnel, Cloudflare carries that traffic and sees the same.
+
+When your node registers, the project's registry records its id, address, public key, capabilities, region, software version, capacity, when it was first and last seen, and the operator name you give (optional). The public directory lists the id, address and status; the operator name is shown only to the project. To have your node's record removed, stop the node and write to the address in the game's [privacy policy](https://openhistoria.com/privacy/), which also tells players what a node sees.
+
 ## Requirements
 
 - **[Node.js 18+](https://nodejs.org/)** (LTS is fine).
